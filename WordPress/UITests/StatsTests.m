@@ -38,7 +38,7 @@
 
 
 - (void) testToggleDayWeekMonth {
-    NSArray * elements = @[@"WEEKS", @"MONTHS", @"DAYS"];
+    NSArray * elements = @[@"Weeks", @"Months", @"Years", @"Days"];
 //    NSDateFormatter *dateFormatter = [[NSDateFormatter alloc] init];
 //    dateFormatter.dateFormat = [NSDateFormatter dateFormatFromTemplate:@"MMM" options:0 locale:[NSLocale currentLocale]];
 //    NSDate * now = [NSDate date];
