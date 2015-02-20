@@ -11,8 +11,6 @@
     [tester tapViewWithAccessibilityLabel:@"Sign In"];
     
     [tester waitForTimeInterval:3];
-    // Verify that the login succeeded
-    [tester waitForViewWithAccessibilityIdentifier:@"Main Navigation"];
 }
 
 - (void) loginOther
