@@ -30,7 +30,7 @@
 {
     [tester tapViewWithAccessibilityLabel:@"Me"];
     [tester waitForTimeInterval:1];
-    [tester tapViewWithAccessibilityLabel:@"Sign Out"];
+    [tester tapViewWithAccessibilityLabel:@"Disconnect from WordPress.com"];
     [tester waitForTimeInterval:1];
     [tester tapViewWithAccessibilityLabel:@"Sign Out"];
     [tester waitForTimeInterval:1];
