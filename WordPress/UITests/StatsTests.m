@@ -5,7 +5,7 @@
 #import "UIWindow-KIFAdditions.h"
 #import "WPUITestCase.h"
 #import "NSError-KIFAdditions.h"
-#import "WPStatsViewController.h"
+#import "StatsSection.h"
 
 @interface StatsTests : WPUITestCase
 
@@ -63,8 +63,8 @@
     [tester waitForTimeInterval:2];
 }
 
-- (void) testTodayYesterday {
-    NSArray * sectionsToTest = @[@(StatsSectionTopPosts), @(StatsSectionViewsByCountry), @(StatsSectionClicks), @(StatsSectionReferrers), @(StatsSectionSearchTerms)];
+- (void)testTodayYesterday {
+    NSArray * sectionsToTest = @[@(StatsSectionGraph), @(StatsSectionPeriodHeader), @(StatsSectionEvents), @(StatsSectionPosts), @(StatsSectionReferrers), @(StatsSectionClicks), @(StatsSectionCountry), @(StatsSectionVideos), @(StatsSectionComments), @(StatsSectionTagsCategories), @(StatsSectionFollowers), @(StatsSectionPublicize), @(StatsSectionPublicize), @(StatsSectionWebVersion)];
     
     for (NSNumber * section in sectionsToTest){
         [tester waitForCellAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:[section intValue]] inTableViewWithAccessibilityIdentifier:@"Stats Table"];
@@ -82,7 +82,7 @@
 }
 
 - (void) testViewWebVersion {
-    [tester tapRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:StatsSectionLinkToWebview] inTableViewWithAccessibilityIdentifier:@"Stats Table"];
+    [tester tapRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:StatsSectionWebVersion] inTableViewWithAccessibilityIdentifier:@"Stats Table"];
     [tester waitForTimeInterval:2];
         
     [tester tapViewWithAccessibilityLabel:@"Back"];
