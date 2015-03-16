@@ -47,5 +47,5 @@ target :WordPressTest, :exclusive => true do
 end
 
 target 'UITests', :exclusive => true do
-    pod 'KIF/IdentifierTests', '~>3.1'
+    pod 'KIF/IdentifierTests', '~>3.2'
 end
