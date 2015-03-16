@@ -12,8 +12,8 @@
     
     [tester waitForTimeInterval:3];
     
-    if ([tester tryFindingViewWithAccessibilityLabel:@"Great, thanks!" error:nil]) {
-        [tester tapViewWithAccessibilityLabel:@"Great, thanks!"];
+    if ([tester tryFindingViewWithAccessibilityLabel:@"new-editor-modal-dismiss-button" error:nil]) {
+        [tester tapViewWithAccessibilityLabel:@"new-editor-modal-dismiss-button"];
     }
 }
 
@@ -24,14 +24,17 @@
     [tester tapViewWithAccessibilityLabel:@"Sign In"];
     
     [tester waitForTimeInterval:3];
-    if ([tester tryFindingViewWithAccessibilityLabel:@"Great, thanks!" error:nil]) {
-        [tester tapViewWithAccessibilityLabel:@"Great, thanks!"];
+    if ([tester tryFindingViewWithAccessibilityLabel:@"new-editor-modal-dismiss-button" error:nil]) {
+        [tester tapViewWithAccessibilityLabel:@"new-editor-modal-dismiss-button"];
     }
 
 }
 
 - (void) logout
 {
+    if ([tester tryFindingViewWithAccessibilityLabel:@"new-editor-modal-dismiss-button" error:nil]) {
+        [tester tapViewWithAccessibilityLabel:@"new-editor-modal-dismiss-button"];
+    }
     [tester tapViewWithAccessibilityLabel:@"Me"];
     [tester waitForTimeInterval:1];
     [tester tapViewWithAccessibilityLabel:@"Disconnect from WordPress.com"];
