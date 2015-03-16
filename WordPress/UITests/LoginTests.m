@@ -38,8 +38,9 @@
     [tester tapViewWithAccessibilityLabel:@"Sign In"];
     
     [tester waitForTimeInterval:3];
-    // Verify that the login succeeded
-    [tester waitForViewWithAccessibilityIdentifier:@"GenericErrorMessage"];
+
+    // Verify that the login failed
+    [tester waitForViewWithAccessibilityLabel:@"Sorry, we can't log you in."];
     
     [tester tapViewWithAccessibilityLabel:@"OK"];
 }
