@@ -32,6 +32,7 @@ NSString const *NoteTypeUser            = @"user";
 NSString const *NoteTypeComment         = @"comment";
 NSString const *NoteTypeMatcher         = @"automattcher";
 NSString const *NoteTypePost            = @"post";
+NSString const *NoteTypeFollow          = @"follow";
 
 NSString const *NoteMetaKey             = @"meta";
 NSString const *NoteMediaKey            = @"media";
@@ -76,16 +77,19 @@ NSString const *NotePostIdKey           = @"post_id";
 		_range              = NSMakeRange(location, length);
         _type               = [rawRange stringForKey:NoteTypeKey];
         _siteID             = [rawRange numberForKey:NoteSiteIdKey];
-        
+
         //  SORRY: << Let me stress this. Sorry, i'm 1000% against Duck Typing.
-        //  ======
-        //  `id` is coupled with the `type
+        //  =====
+        //  `id` is coupled with the `type`. Which, in turn, is also duck typed.
         //
         //      type = post     => id = post_id
         //      type = comment  => id = comment_id
         //      type = user     => id = user_id
         //      type = site     => id = site_id
-
+        
+        _type               = (_type == nil && _url != nil) ? (NSString *)NoteRangeTypeSite : _type;
+        _type               = _type ?: [NSString string];
+        
         if ([_type isEqual:NoteRangeTypePost]) {
             _postID         = [rawRange numberForKey:NoteRangeIdKey];
             
@@ -368,6 +372,13 @@ NSString const *NotePostIdKey           = @"post_id";
             if (media.isBadge) {
                 isBadge = true;
             }
+            
+            // TODO:
+            // We've received crashlogs caused by a missing mediaURL field. This assert will only affect debug builds,
+            // and will help us troubleshoot the issue. Please: Feel free to remove this snippet once the bug has been
+            // fixed backend side.
+            //
+            NSAssert(media.mediaURL, @"Missing mediaURL for Notification with SimperiumKey %@", notification.simperiumKey);
         }
         
         [parsed addObject:block];
@@ -603,6 +614,11 @@ NSString const *NotePostIdKey           = @"post_id";
 - (BOOL)isPost
 {
     return [self.type isEqual:NoteTypePost];
+}
+
+- (BOOL)isFollow
+{
+    return [self.type isEqual:NoteTypeFollow];
 }
 
 - (BOOL)isBadge

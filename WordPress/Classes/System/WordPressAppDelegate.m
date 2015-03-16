@@ -20,7 +20,7 @@
 #import "NSString+HTML.h"
 #import "PocketAPI.h"
 #import "ReaderPost.h"
-#import "UIDevice+WordPressIdentifier.h"
+#import "UIDevice+Helpers.h"
 #import "WordPressComApiCredentials.h"
 #import "WPAccount.h"
 #import "AccountService.h"
@@ -80,7 +80,6 @@ static NSString * const MustShowWhatsNewPopup                   = @"MustShowWhat
 @property (nonatomic, assign, readwrite) UIBackgroundTaskIdentifier     bgTask;
 @property (nonatomic, assign, readwrite) BOOL                           connectionAvailable;
 @property (nonatomic, assign, readwrite) BOOL                           wpcomAvailable;
-@property (nonatomic, assign, readwrite) BOOL                           listeningForBlogChanges;
 @property (nonatomic, strong, readwrite) NSDate                         *applicationOpenedTime;
 
 /**
@@ -122,11 +121,17 @@ static NSString * const MustShowWhatsNewPopup                   = @"MustShowWhat
     // Start Simperium
     [self loginSimperium];
 
+    // Local Notifications
+    [self listenLocalNotifications];
+    
     // Debugging
     [self printDebugLaunchInfoWithLaunchOptions:launchOptions];
     [self toggleExtraDebuggingIfNeeded];
     [self removeCredentialsForDebug];
 
+    // Stop Storing WordPress.com passwords
+    [self removeWordPressComPassword];
+    
     // Stats and feedback    
     [SupportViewController checkIfFeedbackShouldBeEnabled];
 
@@ -161,7 +166,6 @@ static NSString * const MustShowWhatsNewPopup                   = @"MustShowWhat
     [self setupSingleSignOn];
 
     [self customizeAppearance];
-    [self trackLowMemory];
     
     // Push notifications
     [NotificationsManager registerForPushNotifications];
@@ -653,15 +657,6 @@ static NSString * const MustShowWhatsNewPopup                   = @"MustShowWhat
     }];
 }
 
-- (void)trackLowMemory
-{
-    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(lowMemoryWarning:) name:UIApplicationDidReceiveMemoryWarningNotification object:nil];
-}
-
-- (void)lowMemoryWarning:(NSNotification *)notification
-{
-    [WPAnalytics track:WPAnalyticsStatLowMemoryWarning];
-}
 
 #pragma mark - Application directories
 
@@ -679,28 +674,11 @@ static NSString * const MustShowWhatsNewPopup                   = @"MustShowWhat
     [fileManager changeCurrentDirectoryPath:currentDirectoryPath];
 }
 
-#pragma mark - Notifications
-
-- (void)defaultAccountDidChange:(NSNotification *)notification
-{
-    NSManagedObjectContext *context = [[ContextManager sharedInstance] mainContext];
-    AccountService *accountService = [[AccountService alloc] initWithManagedObjectContext:context];
-    WPAccount *defaultAccount = [accountService defaultWordPressComAccount];
-
-    [Crashlytics setUserName:[defaultAccount username]];
-    [self setCommonCrashlyticsParameters];
-
-    [WPAnalytics track:WPAnalyticsStatDefaultAccountChanged];
-}
-
 #pragma mark - Crash reporting
 
 - (void)configureCrashlytics
 {
-#if DEBUG
-    return;
-#endif
-#ifdef INTERNAL_BUILD
+#if defined(INTERNAL_BUILD) || defined(DEBUG)
     return;
 #endif
 
@@ -711,18 +689,7 @@ static NSString * const MustShowWhatsNewPopup                   = @"MustShowWhat
     [Crashlytics startWithAPIKey:[WordPressComApiCredentials crashlyticsApiKey]];
     [[Crashlytics sharedInstance] setDelegate:self];
 
-    NSManagedObjectContext *context = [[ContextManager sharedInstance] mainContext];
-    AccountService *accountService = [[AccountService alloc] initWithManagedObjectContext:context];
-    WPAccount *defaultAccount = [accountService defaultWordPressComAccount];
-
-    BOOL hasCredentials = (defaultAccount != nil);
     [self setCommonCrashlyticsParameters];
-
-    if (hasCredentials && [defaultAccount username] != nil) {
-        [Crashlytics setUserName:[defaultAccount username]];
-    }
-
-    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(defaultAccountDidChange:) name:WPAccountDefaultWordPressComAccountChangedNotification object:nil];
 }
 
 - (void)crashlytics:(Crashlytics *)crashlytics didDetectCrashDuringPreviousExecution:(id<CLSCrashReport>)crash
@@ -737,12 +704,17 @@ static NSString * const MustShowWhatsNewPopup                   = @"MustShowWhat
 
 - (void)setCommonCrashlyticsParameters
 {
+#if defined(INTERNAL_BUILD) || defined(DEBUG)
+    return;
+#endif
+    
     NSManagedObjectContext *context = [[ContextManager sharedInstance] mainContext];
     AccountService *accountService = [[AccountService alloc] initWithManagedObjectContext:context];
     BlogService *blogService = [[BlogService alloc] initWithManagedObjectContext:context];
     WPAccount *defaultAccount = [accountService defaultWordPressComAccount];
 
     BOOL loggedIn = defaultAccount != nil;
+    [Crashlytics setUserName:defaultAccount.username];
     [Crashlytics setObjectValue:@(loggedIn) forKey:@"logged_in"];
     [Crashlytics setObjectValue:@(loggedIn) forKey:@"connected_to_dotcom"];
     [Crashlytics setObjectValue:@([blogService blogCountForAllAccounts]) forKey:@"number_of_blogs"];
@@ -836,23 +808,21 @@ static NSString * const MustShowWhatsNewPopup                   = @"MustShowWhat
     }];
 }
 
-#pragma mark - Networking setup, User agents
+
+
+#pragma mark - User agents
 
 - (void)setupUserAgent
 {
     // Keep a copy of the original userAgent for use with certain webviews in the app.
-    UIWebView *webView = [[UIWebView alloc] init];
-    NSString *defaultUA = [webView stringByEvaluatingJavaScriptFromString:@"navigator.userAgent"];
+    NSString *defaultUA = [[[UIWebView alloc] init] stringByEvaluatingJavaScriptFromString:@"navigator.userAgent"];
+    NSString *wordPressUserAgent = [[UIDevice currentDevice] wordPressUserAgent];
 
-    NSString *appVersion = [[[NSBundle mainBundle] infoDictionary] objectForKey:@"CFBundleShortVersionString"];
-    [[NSUserDefaults standardUserDefaults] setObject:appVersion forKey:@"version_preference"];
-    NSString *appUA = [NSString stringWithFormat:@"wp-iphone/%@ (%@ %@, %@) Mobile",
-                       appVersion,
-                       [[UIDevice currentDevice] systemName],
-                       [[UIDevice currentDevice] systemVersion],
-                       [[UIDevice currentDevice] model]
-                       ];
-    NSDictionary *dictionary = [[NSDictionary alloc] initWithObjectsAndKeys: appUA, @"UserAgent", defaultUA, @"DefaultUserAgent", appUA, @"AppUserAgent", nil];
+    NSDictionary *dictionary = @{
+        @"UserAgent"        : wordPressUserAgent,
+        @"DefaultUserAgent" : defaultUA,
+        @"AppUserAgent"     : wordPressUserAgent
+    };
     [[NSUserDefaults standardUserDefaults] registerDefaults:dictionary];
 }
 
@@ -871,7 +841,7 @@ static NSString * const MustShowWhatsNewPopup                   = @"MustShowWhat
     NSDictionary *dictionary = [[NSDictionary alloc] initWithObjectsAndKeys:ua, @"UserAgent", nil];
     // We have to call registerDefaults else the change isn't picked up by UIWebViews.
     [[NSUserDefaults standardUserDefaults] registerDefaults:dictionary];
-
+    
     DDLogVerbose(@"User-Agent set to: %@", ua);
 }
 
@@ -880,16 +850,18 @@ static NSString * const MustShowWhatsNewPopup                   = @"MustShowWhat
     return [[NSUserDefaults standardUserDefaults] objectForKey:@"UserAgent"];
 }
 
+
+#pragma mark - Networking setup
+
 - (void)setupSingleSignOn
 {
     NSManagedObjectContext *context = [[ContextManager sharedInstance] mainContext];
     AccountService *accountService = [[AccountService alloc] initWithManagedObjectContext:context];
     WPAccount *defaultAccount = [accountService defaultWordPressComAccount];
-
-    if ([defaultAccount username]) {
-        [[WPComOAuthController sharedController] setWordPressComUsername:[defaultAccount username]];
-        [[WPComOAuthController sharedController] setWordPressComPassword:[defaultAccount password]];
-    }
+    WPComOAuthController *oAuthController = [WPComOAuthController sharedController];
+    
+    [oAuthController setWordPressComUsername:defaultAccount.username];
+    [oAuthController setWordPressComAuthToken:defaultAccount.authToken];
 }
 
 - (void)setupReachability
@@ -1060,6 +1032,17 @@ static NSString * const MustShowWhatsNewPopup                   = @"MustShowWhat
     DDLogVerbose(@"End keychain fixing");
 }
 
+#pragma mark - WordPress.com Accounts
+
+- (void)removeWordPressComPassword
+{
+    // Nuke WordPress.com stored passwords, since it's no longer required.
+    NSManagedObjectContext *mainContext = [[ContextManager sharedInstance] mainContext];
+    AccountService *accountService = [[AccountService alloc] initWithManagedObjectContext:mainContext];
+    [accountService removeWordPressComAccountPasswordIfNeeded];
+}
+
+
 #pragma mark - Debugging and logging
 
 - (void)printDebugLaunchInfoWithLaunchOptions:(NSDictionary *)launchOptions
@@ -1082,9 +1065,9 @@ static NSString * const MustShowWhatsNewPopup                   = @"MustShowWhat
 #endif
     DDLogInfo(@"Extra debug: %@", extraDebug ? @"YES" : @"NO");
     DDLogInfo(@"Device model: %@ (%@)", [UIDeviceHardware platformString], [UIDeviceHardware platform]);
-    DDLogInfo(@"OS:        %@ %@", [device systemName], [device systemVersion]);
+    DDLogInfo(@"OS:        %@ %@", device.systemName, device.systemVersion);
     DDLogInfo(@"Language:  %@", currentLanguage);
-    DDLogInfo(@"UDID:      %@", [device wordpressIdentifier]);
+    DDLogInfo(@"UDID:      %@", device.wordPressIdentifier);
     DDLogInfo(@"APN token: %@", [NotificationsManager registeredPushNotificationsToken]);
     DDLogInfo(@"Launch options: %@", launchOptions);
 
@@ -1190,11 +1173,6 @@ static NSString * const MustShowWhatsNewPopup                   = @"MustShowWhat
 
 - (void)toggleExtraDebuggingIfNeeded
 {
-    if (!_listeningForBlogChanges) {
-        _listeningForBlogChanges = YES;
-        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(handleDefaultAccountChangedNotification:) name:WPAccountDefaultWordPressComAccountChangedNotification object:nil];
-    }
-
     if ([self noBlogsAndNoWordPressDotComAccount]) {
         // When there are no blogs in the app the settings screen is unavailable.
         // In this case, enable extra_debugging by default to help troubleshoot any issues.
@@ -1224,12 +1202,25 @@ static NSString * const MustShowWhatsNewPopup                   = @"MustShowWhat
     }
 }
 
-#pragma mark - Notifications
+#pragma mark - Local Notifications Helpers
 
-- (void)handleDefaultAccountChangedNotification:(NSNotification *)notification
+- (void)listenLocalNotifications
 {
-    [self toggleExtraDebuggingIfNeeded];
+    NSNotificationCenter *notificationCenter = [NSNotificationCenter defaultCenter];
+    
+    [notificationCenter addObserver:self
+                           selector:@selector(handleDefaultAccountChangedNote:)
+                               name:WPAccountDefaultWordPressComAccountChangedNotification
+                             object:nil];
+    
+    [notificationCenter addObserver:self
+                           selector:@selector(handleLowMemoryWarningNote:)
+                               name:UIApplicationDidReceiveMemoryWarningNotification
+                             object:nil];
+}
 
+- (void)handleDefaultAccountChangedNote:(NSNotification *)notification
+{
     // If the notification object is not nil, then it's a login
     if (notification.object) {
         [self loginSimperium];
@@ -1244,12 +1235,26 @@ static NSString * const MustShowWhatsNewPopup                   = @"MustShowWhat
             }
         }];
     } else {
-        // No need to check for welcome screen unless we are signing out
+        if ([self noBlogsAndNoWordPressDotComAccount]) {
+            [WPAnalytics track:WPAnalyticsStatLogout];
+        }
         [self logoutSimperiumAndResetNotifications];
         [self showWelcomeScreenIfNeededAnimated:NO];
         [self removeTodayWidgetConfiguration];
     }
+    
+    [self toggleExtraDebuggingIfNeeded];
+    [self setCommonCrashlyticsParameters];
+    [self setupSingleSignOn];
+    
+    [WPAnalytics track:WPAnalyticsStatDefaultAccountChanged];
 }
+
+- (void)handleLowMemoryWarningNote:(NSNotification *)notification
+{
+    [WPAnalytics track:WPAnalyticsStatLowMemoryWarning];
+}
+
 
 #pragma mark - Today Extension
 

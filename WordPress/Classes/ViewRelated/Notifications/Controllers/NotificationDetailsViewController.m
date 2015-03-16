@@ -5,7 +5,7 @@
 
 #import "Blog.h"
 #import "Notification.h"
-#import "WPToast.h"
+#import <SVProgressHUD/SVProgressHUD.h>
 
 #import "ContextManager.h"
 
@@ -17,6 +17,7 @@
 #import "ReaderPostDetailViewController.h"
 #import "ReaderCommentsViewController.h"
 #import "StatsViewController.h"
+#import "StatsViewAllTableViewController.h"
 #import "EditCommentViewController.h"
 #import "EditReplyViewController.h"
 
@@ -47,9 +48,7 @@ static UIEdgeInsets NotificationTableInsetsPad          = {40.0f, 0.0f, 20.0f, 0
 static UIEdgeInsets NotificationHeaderSeparatorInsets   = {0.0f,  0.0f,  0.0f, 0.0f};
 static UIEdgeInsets NotificationBlockSeparatorInsets    = {0.0f, 12.0f,  0.0f, 0.0f};
 
-static NSString *NotificationReplyToastImage            = @"action-icon-replied";
-static NSString *NotificationSuccessToastImage          = @"action-icon-success";
-
+static NSTimeInterval NotificationFiveMinutes           = 60 * 5;
 static NSInteger NotificationSectionCount               = 1;
 
 static NSString *NotificationsSiteIdKey                 = @"NotificationsSiteIdKey";
@@ -510,12 +509,8 @@ static NSString *NotificationsCommentIdKey              = @"NotificationsComment
         
     // Header-Level: Push the resource associated with the note
     } else if (group.type == NoteBlockGroupTypeHeader) {
-
-        if (self.note.isComment) {
-            [self displayCommentsWithPostId:self.note.metaPostID siteID:self.note.metaSiteID];
-        } else {
-            [self displayReaderWithPostId:self.note.metaPostID siteID:self.note.metaSiteID];
-        }
+        
+        [self openNotificationHeader:group];
     }
 }
 
@@ -577,8 +572,8 @@ static NSString *NotificationsCommentIdKey              = @"NotificationsComment
     NotificationBlock *snippetBlock     = [blockGroup blockOfType:NoteBlockTypeText];
     NotificationMedia *media            = gravatarBlock.media.firstObject;
     
-    cell.name                           = gravatarBlock.text;
-    cell.snippet                        = snippetBlock.text;
+    cell.attributedHeaderTitle          = gravatarBlock.attributedHeaderTitleText;
+    cell.headerDetails                  = snippetBlock.text;
     
     if ([self isLayoutCell:cell]) {
         return;
@@ -647,7 +642,7 @@ static NSString *NotificationsCommentIdKey              = @"NotificationsComment
     cell.isApproveOn                = [commentBlock isActionOn:NoteActionApproveKey];
     
     cell.name                       = userBlock.text;
-    cell.attributedCommentText      = [commentBlock.richAttributedText stringByEmbeddingImageAttachments:mediaRanges];
+    cell.attributedCommentText      = [commentBlock.attributedRichText stringByEmbeddingImageAttachments:mediaRanges];
     cell.timestamp                  = timestamp;
     cell.site                       = site;
     
@@ -726,8 +721,11 @@ static NSString *NotificationsCommentIdKey              = @"NotificationsComment
     NSDictionary *mediaMap          = [self.mediaDownloader imagesForUrls:textBlock.imageUrls];
     NSDictionary *mediaRanges       = [textBlock buildRangesToImagesMap:mediaMap];
     
+    // Load the attributedText
+    NSAttributedString *text        = textBlock.isBadge ? textBlock.attributedBadgeText : textBlock.attributedRichText;
+    
     // Setup the Cell
-    cell.attributedText             = [textBlock.richAttributedText stringByEmbeddingImageAttachments:mediaRanges];
+    cell.attributedText             = [text stringByEmbeddingImageAttachments:mediaRanges];
     cell.isBadge                    = textBlock.isBadge;
     
     // Setup the Callbacks
@@ -738,7 +736,7 @@ static NSString *NotificationsCommentIdKey              = @"NotificationsComment
 }
 
 
-#pragma mark - Helpers
+#pragma mark - Associated Resources
 
 - (void)openURL:(NSURL *)url
 {
@@ -765,6 +763,39 @@ static NSString *NotificationsCommentIdKey              = @"NotificationsComment
         [self.tableView deselectSelectedRowWithAnimation:YES];
     }
 }
+
+- (void)openNotificationHeader:(NotificationBlockGroup *)header
+{
+    NSParameterAssert(header);
+    NSParameterAssert(header.type == NoteBlockGroupTypeHeader);
+    
+    BOOL success = false;
+    
+    if (!success && self.note.isFollow) {
+        success = [self displayFollowersWithSiteID:self.note.metaSiteID];
+        success = YES;
+    }
+    
+    if (!success && self.note.metaCommentID) {
+        success = [self displayCommentsWithPostId:self.note.metaPostID siteID:self.note.metaSiteID];
+    }
+    
+    if (!success) {
+        success = [self displayReaderWithPostId:self.note.metaPostID siteID:self.note.metaSiteID];
+    }
+    
+    if (!success) {
+        NSURL *resourceURL = [NSURL URLWithString:self.note.url];
+        success = [self displayWebViewWithURL:resourceURL];
+    }
+    
+    if (!success) {
+        [self.tableView deselectSelectedRowWithAnimation:YES];
+    }
+}
+
+
+#pragma mark - Helpers
 
 - (BOOL)displayReaderWithPostId:(NSNumber *)postID siteID:(NSNumber *)siteID
 {
@@ -812,6 +843,41 @@ static NSString *NotificationsCommentIdKey              = @"NotificationsComment
         [self.navigationController pushViewController:vc animated:YES];
     }
     return success;
+}
+
+- (BOOL)displayFollowersWithSiteID:(NSNumber *)siteID
+{
+    if (!siteID) {
+        return false;
+    }
+    
+    // Load the blog
+    NSManagedObjectContext *context = [[ContextManager sharedInstance] mainContext];
+    BlogService *service            = [[BlogService alloc] initWithManagedObjectContext:context];
+    Blog *blog                      = [service blogByBlogId:siteID];
+
+    if (!blog || !blog.isWPcom) {
+        return NO;
+    }
+
+    // Push the Stats ViewController
+    NSString *identifier            = NSStringFromClass([StatsViewAllTableViewController class]);
+    
+    UIStoryboard *statsStoryboard   = [UIStoryboard storyboardWithName:@"SiteStats" bundle:nil];
+    StatsViewAllTableViewController *vc = [statsStoryboard instantiateViewControllerWithIdentifier:identifier];
+    NSAssert(vc, @"Couldn't instantiate StatsViewAllTableViewController");
+    
+    vc.selectedDate                = [NSDate date];
+    vc.statsSection                = StatsSectionFollowers;
+    vc.statsSubSection             = StatsSubSectionFollowersDotCom;
+    vc.statsService                = [[WPStatsService alloc] initWithSiteId:blog.blogID
+                                                               siteTimeZone:[service timeZoneForBlog:blog]
+                                                                oauth2Token:blog.authToken
+                                                 andCacheExpirationInterval:NotificationFiveMinutes];
+    
+    [self.navigationController pushViewController:vc animated:YES];
+    
+    return YES;
 }
 
 - (BOOL)displayWebViewWithURL:(NSURL *)url
@@ -1009,22 +1075,19 @@ static NSString *NotificationsCommentIdKey              = @"NotificationsComment
 
 - (void)sendReplyWithBlock:(NotificationBlock *)block content:(NSString *)content
 {
-    NSString *successMessage        = NSLocalizedString(@"Reply Sent!", @"The app successfully sent a comment");
-    NSString *sendingMessage        = NSLocalizedString(@"Sending...", @"The app is uploading a comment");
-    UIImage *successImage           = [UIImage imageNamed:NotificationSuccessToastImage];
-    UIImage *sendingImage           = [UIImage imageNamed:NotificationReplyToastImage];
-    
     NSManagedObjectContext *context = [[ContextManager sharedInstance] mainContext];
     CommentService *service         = [[CommentService alloc] initWithManagedObjectContext:context];
     
-    [service replyToCommentWithID:block.metaCommentID siteID:block.metaSiteID content:content success:^(){
-        [WPToast showToastWithMessage:successMessage andImage:successImage];
-        
-    } failure:^(NSError *error) {
-        [self handleReplyErrorWithBlock:block content:content];
-    }];
-    
-    [WPToast showToastWithMessage:sendingMessage andImage:sendingImage];
+    [service replyToCommentWithID:block.metaCommentID
+                           siteID:block.metaSiteID
+                          content:content
+                          success:^{
+                              NSString *successMessage = NSLocalizedString(@"Reply Sent!", @"The app successfully sent a comment");
+                              [SVProgressHUD showSuccessWithStatus:successMessage];
+                          }
+                          failure:^(NSError *error) {
+                              [self handleReplyErrorWithBlock:block content:content];
+                          }];
 }
 
 - (void)handleReplyErrorWithBlock:(NotificationBlock *)block content:(NSString *)content
