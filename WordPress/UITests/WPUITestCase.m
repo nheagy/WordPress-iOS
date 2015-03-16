@@ -11,6 +11,10 @@
     [tester tapViewWithAccessibilityLabel:@"Sign In"];
     
     [tester waitForTimeInterval:3];
+    
+    if ([tester tryFindingViewWithAccessibilityLabel:@"Great, thanks!" error:nil]) {
+        [tester tapViewWithAccessibilityLabel:@"Great, thanks!"];
+    }
 }
 
 - (void) loginOther
@@ -20,8 +24,10 @@
     [tester tapViewWithAccessibilityLabel:@"Sign In"];
     
     [tester waitForTimeInterval:3];
-    // Verify that the login succeeded
-    [tester waitForViewWithAccessibilityIdentifier:@"Main Navigation"];
+    if ([tester tryFindingViewWithAccessibilityLabel:@"Great, thanks!" error:nil]) {
+        [tester tapViewWithAccessibilityLabel:@"Great, thanks!"];
+    }
+
 }
 
 - (void) logout
