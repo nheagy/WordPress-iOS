@@ -39,10 +39,8 @@ msgid ""
 "blog, wordpress\n"
 msgstr ""
 
-
-msgctxt "v5.0-whats-new"
+msgctxt "v6.0-whats-new"
 msgid ""
-"• New multifactor auth support, which means you no longer need to generate app-specific passwords to log in to WordPress for iOS."
-"• New stats sections for items published and post authors, and a new post details screen."
-"• Improvements to the notifications section."
+"• The new My Profile section lets you change your public WordPress.com profile in seconds. If you ever wanted to be known as Darth Hex or Princess Buttercup, now’s your chance!"
+"• We know, we know, creating WordPress.com sites can get addictive. But if you feel like decluttering your dashboard, you can now just delete a site (or two) directly from the app."
 msgstr ""

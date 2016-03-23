@@ -22,7 +22,6 @@
 
 - (void)dealloc
 {
-    [[WordPressAppDelegate sharedInstance].userAgent useWordPressUserAgent];
     [self.webView stopLoading];
     self.webView.delegate = nil;
 }
@@ -56,17 +55,12 @@
 - (void)viewWillAppear:(BOOL)animated
 {
     [super viewWillAppear:animated];
-    [[WordPressAppDelegate sharedInstance].userAgent useDefaultUserAgent];
-    if (self.shouldHideStatusBar && !IS_IPAD) {
-        [[UIApplication sharedApplication] setStatusBarHidden:YES withAnimation:nil];
-    }
     [self refreshWebView];
 }
 
 - (void)viewWillDisappear:(BOOL)animated
 {
     [super viewWillDisappear:animated];
-    [[WordPressAppDelegate sharedInstance].userAgent useWordPressUserAgent];
     [self.webView stopLoading];
 }
 
@@ -191,18 +185,16 @@
 {
     BOOL needsLogin = NO;
     NSString *status = self.apost.status;
-    NSDate *postGMTDate = self.apost.date_created_gmt;
-    NSDate *laterDate = [self.apost.date_created_gmt laterDate:[NSDate date]];
 
-    if ([status isEqualToString:@"draft"]) {
+    if ([status isEqualToString:PostStatusDraft]) {
         needsLogin = YES;
-    } else if ([status isEqualToString:@"private"]) {
+    } else if ([status isEqualToString:PostStatusPrivate]) {
         needsLogin = YES;
-    } else if ([status isEqualToString:@"pending"]) {
+    } else if ([status isEqualToString:PostStatusPending]) {
         needsLogin = YES;
     } else if ([self.apost.blog isPrivate]) {
         needsLogin = YES; // Private blog
-    } else if ([laterDate isEqualToDate:postGMTDate]) {
+    } else if ([self.apost isScheduled]) {
         needsLogin = YES; // Scheduled post
     }
 
@@ -218,15 +210,28 @@
         if (needsLogin) {
             NSURL *loginURL = [NSURL URLWithString:self.apost.blog.loginUrl];
             NSURL *redirectURL = [NSURL URLWithString:link];
-            
-            NSURLRequest *request = [WPURLRequest requestForAuthenticationWithURL:loginURL
-                                                                      redirectURL:redirectURL
-                                                                         username:self.apost.blog.username
-                                                                         password:self.apost.blog.password
-                                                                      bearerToken:self.apost.blog.authToken
-                                                                        userAgent:nil];
-            [self.webView loadRequest:request];
-            DDLogInfo(@"Showing real preview (login) for %@", link);
+            NSString *username = self.apost.blog.usernameForSite;
+            NSString *token, *password;
+            if ([self.apost.blog supports:BlogFeatureOAuth2Login]) {
+                password = nil;
+                token = self.apost.blog.authToken;
+            } else {
+                password = self.apost.blog.password;
+                token = nil;
+            }
+
+            if (username.length > 0 && (password.length > 0 || token.length > 0)) {
+                NSURLRequest *request = [WPURLRequest requestForAuthenticationWithURL:loginURL
+                                                                          redirectURL:redirectURL
+                                                                             username:username
+                                                                             password:password
+                                                                          bearerToken:token
+                                                                            userAgent:nil];
+                [self.webView loadRequest:request];
+                DDLogInfo(@"Showing real preview (login) for %@", link);
+            } else {
+                [self showSimplePreview];
+            }
         } else {
             [self.webView loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:link]]];
             DDLogInfo(@"Showing real preview for %@", link);
@@ -307,6 +312,14 @@
 {
     NSArray *comps = [surString componentsSeparatedByString:@"\n"];
     return [comps componentsJoinedByString:@"<br>"];
+}
+
+#pragma mark - Status bar management
+
+- (BOOL)prefersStatusBarHidden
+{
+    // Do not hide status bar on iPad
+    return (self.shouldHideStatusBar && !IS_IPAD);
 }
 
 @end

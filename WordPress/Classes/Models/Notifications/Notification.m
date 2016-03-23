@@ -25,6 +25,7 @@ NSString const *NoteRangeTypeFollow     = @"follow";
 NSString const *NoteRangeTypeBlockquote = @"blockquote";
 NSString const *NoteRangeTypeNoticon    = @"noticon";
 NSString const *NoteRangeTypeSite       = @"site";
+NSString const *NoteRangeTypeMatch      = @"match";
 
 NSString const *NoteMediaTypeImage      = @"image";
 NSString const *NoteMediaTypeBadge      = @"badge";
@@ -34,6 +35,8 @@ NSString const *NoteTypeComment         = @"comment";
 NSString const *NoteTypeMatcher         = @"automattcher";
 NSString const *NoteTypePost            = @"post";
 NSString const *NoteTypeFollow          = @"follow";
+NSString const *NoteTypeLike            = @"like";
+NSString const *NoteTypeCommentLike     = @"comment_like";
 
 NSString const *NoteMetaKey             = @"meta";
 NSString const *NoteMediaKey            = @"media";
@@ -57,6 +60,17 @@ NSString const *NoteRangeIdKey          = @"id";
 NSString const *NoteRangeValueKey       = @"value";
 NSString const *NoteSiteIdKey           = @"site_id";
 NSString const *NotePostIdKey           = @"post_id";
+NSString const *NoteReplyIdKey          = @"reply_comment";
+
+
+
+#pragma mark ====================================================================================
+#pragma mark Notification: Private Methods
+#pragma mark ====================================================================================
+
+@interface Notification (Internals)
+- (void)didChangeOverrides;
+@end
 
 
 #pragma mark ====================================================================================
@@ -222,8 +236,8 @@ NSString const *NotePostIdKey           = @"post_id";
 @interface NotificationBlock ()
 @property (nonatomic, strong, readwrite) NSMutableDictionary    *actionsOverride;
 @property (nonatomic, assign, readwrite) NoteBlockType          type;
-@property (nonatomic, assign, readwrite) BOOL                   isBadge;
 @property (nonatomic, strong, readwrite) NSMutableDictionary    *dynamicAttributesCache;
+@property (nonatomic,   weak, readwrite) Notification           *parent;
 @end
 
 
@@ -279,6 +293,17 @@ NSString const *NotePostIdKey           = @"post_id";
     return nil;
 }
 
+- (NotificationRange *)notificationRangeWithCommentId:(NSNumber *)commentId
+{
+    for (NotificationRange *range in self.ranges) {
+        if ([range.commentID isEqual:commentId]) {
+            return range;
+        }
+    }
+    
+    return nil;
+}
+
 - (NSArray *)imageUrls
 {
     NSMutableArray *urls = [NSMutableArray array];
@@ -292,6 +317,11 @@ NSString const *NotePostIdKey           = @"post_id";
     return urls;
 }
 
+- (BOOL)isCommentApproved
+{
+    return [self isActionOn:NoteActionApproveKey] || ![self isActionEnabled:NoteActionApproveKey];
+}
+
 - (void)setActionOverrideValue:(NSNumber *)value forKey:(NSString *)key
 {
     if (!_actionsOverride) {
@@ -299,6 +329,8 @@ NSString const *NotePostIdKey           = @"post_id";
     }
     
     _actionsOverride[key] = value;
+    
+    [self.parent didChangeOverrides];
 }
 
 - (void)removeActionOverrideForKey:(NSString *)key
@@ -335,14 +367,23 @@ NSString const *NotePostIdKey           = @"post_id";
     self.dynamicAttributesCache[key] = value;
 }
 
++ (NotificationBlock *)firstBlockOfType:(NoteBlockType)type fromBlocksArray:(NSArray *)blocks
+{
+    for (NotificationBlock *block in blocks) {
+        if (block.type == type) {
+            return block;
+        }
+    }
+    return nil;
+}
+
 + (NSArray *)blocksFromArray:(NSArray *)rawBlocks notification:(Notification *)notification
 {
     if (![rawBlocks isKindOfClass:[NSArray class]]) {
         return nil;
     }
     
-    NSMutableArray *parsed  = [NSMutableArray array];
-    BOOL isBadge = false;
+    NSMutableArray *parsed = [NSMutableArray array];
     
     for (NSDictionary *rawDict in rawBlocks) {
         if (![rawDict isKindOfClass:[NSDictionary class]]) {
@@ -350,6 +391,7 @@ NSString const *NotePostIdKey           = @"post_id";
         }
         
         NotificationBlock *block    = [[[self class] alloc] initWithDictionary:rawDict];
+        block.parent                = notification;
         
         //  Duck Typing code below:
         //  Infer block type based on... stuff. (Sorry)
@@ -363,38 +405,17 @@ NSString const *NotePostIdKey           = @"post_id";
         //  Comments
         } else if ([block.metaCommentID isEqual:notification.metaCommentID] && block.metaSiteID != nil) {
             block.type = NoteBlockTypeComment;
-            
+
         //  Images
         } else if (media.isImage || media.isBadge) {
             block.type = NoteBlockTypeImage;
-            
+         
         //  Text
         } else {
             block.type = NoteBlockTypeText;
         }
 
-        // Figure out if this is a badge
-        for (NotificationMedia *media in block.media) {
-            if (media.isBadge) {
-                isBadge = true;
-            }
-            
-            // TODO:
-            // We've received crashlogs caused by a missing mediaURL field. This assert will only affect debug builds,
-            // and will help us troubleshoot the issue. Please: Feel free to remove this snippet once the bug has been
-            // fixed backend side.
-            //
-            NSAssert(media.mediaURL, @"Missing mediaURL for Notification with SimperiumKey %@", notification.simperiumKey);
-        }
-        
         [parsed addObject:block];
-    }
-    
-    // Note: Seriously. Duck typing should be abolished.
-    if (isBadge) {
-        for (NotificationBlock *block in parsed) {
-            block.isBadge = true;
-        }
     }
     
     return parsed;
@@ -416,12 +437,7 @@ NSString const *NotePostIdKey           = @"post_id";
 
 - (NotificationBlock *)blockOfType:(NoteBlockType)type
 {
-    for (NotificationBlock *block in self.blocks) {
-        if (block.type == type) {
-            return block;
-        }
-    }
-    return nil;
+    return [NotificationBlock firstBlockOfType:type fromBlocksArray:self.blocks];
 }
 
 - (NSSet *)imageUrlsForBlocksOfTypes:(NSSet *)types
@@ -470,12 +486,58 @@ NSString const *NotePostIdKey           = @"post_id";
         
     // Comment: Contains a User + Comment Block
     } else if (notification.isComment) {
-        [groups addObject:[NotificationBlockGroup groupWithBlocks:blocks type:NoteBlockGroupTypeComment]];
-       
+        
+        //  Note:
+        //  I find myself, again, surrounded by the forces of Duck Typing. Comment Notifications are now
+        //  required to always render the Actions at the very bottom. This snippet is meant to adapt the backend
+        //  data structure, so that a single NotificationBlockGroup can be easily mapped against a single UI entity.
+        //
+        //  -   NoteBlockGroupTypeComment: NoteBlockTypeComment + NoteBlockTypeUser
+        //  -   Anything
+        //  -   NoteBlockGroupTypeActions: A copy of the NoteBlockTypeComment block
+        
+        NotificationBlock *commentBlock = [NotificationBlock firstBlockOfType:NoteBlockTypeComment fromBlocksArray:blocks];
+        NotificationBlock *userBlock    = [NotificationBlock firstBlockOfType:NoteBlockTypeUser fromBlocksArray:blocks];
+        NSArray *commentGroupBlocks     = @[commentBlock, userBlock];
+        NSArray *actionsGroupBlocks     = @[commentBlock];
+        
+        NSMutableArray *middleBlocks    = [blocks mutableCopy];
+        [middleBlocks removeObjectsInArray:commentGroupBlocks];
+        
+        // Finally, arrange the Block Groups
+        [groups addObject:[NotificationBlockGroup groupWithBlocks:commentGroupBlocks type:NoteBlockGroupTypeComment]];
+
+        for (NotificationBlock *block in middleBlocks) {
+            
+            // Duck Typing Again:
+            // If the block contains a range that matches with the metaReplyID field, we'll need to render this
+            // with a custom style
+            //
+            BOOL isReply                = [block notificationRangeWithCommentId:notification.metaReplyID] != nil;
+            NoteBlockGroupType type     = isReply ? NoteBlockGroupTypeFooter : block.type;
+            
+            [groups addObject:[NotificationBlockGroup groupWithBlocks:@[block] type:type]];
+        }
+        
+        [groups addObject:[NotificationBlockGroup groupWithBlocks:actionsGroupBlocks type:NoteBlockGroupTypeActions]];
+        
+        
     // Rest: 1-1 relationship
     } else {
+        
+        //  More Duck Typing:
+        //
+        //  -   Notifications of the kind [Follow, Like, CommentLike] may contain a Footer block.
+        //  -   We can assume that whenever the last block is of the type NoteBlockTypeText, we're dealing with a footer.
+        //  -   Whenever we detect such a block, we'll map the NotificationBlock into a NoteBlockGroupTypeFooter group.
+        //
+        BOOL canContainFooter           = notification.isFollow || notification.isLike || notification.isCommentLike;
+        
         for (NotificationBlock *block in blocks) {
-            [groups addObject:[NotificationBlockGroup groupWithBlocks:@[block] type:block.type]];
+            BOOL isFooter               = canContainFooter && block.type == NoteBlockTypeText && blocks.lastObject == block;
+            NoteBlockGroupType type     = isFooter ? NoteBlockGroupTypeFooter : block.type;
+            
+            [groups addObject:[NotificationBlockGroup groupWithBlocks:@[block] type:type]];
         }
     }
     
@@ -607,6 +669,11 @@ NSString const *NotePostIdKey           = @"post_id";
     return [[self.meta dictionaryForKey:NoteIdsKey] numberForKey:NoteCommentKey];
 }
 
+- (NSNumber *)metaReplyID
+{
+    return [[self.meta dictionaryForKey:NoteIdsKey] numberForKey:NoteReplyIdKey];
+}
+
 - (BOOL)isMatcher
 {
     return [self.type isEqual:NoteTypeMatcher];
@@ -627,6 +694,16 @@ NSString const *NotePostIdKey           = @"post_id";
     return [self.type isEqual:NoteTypeFollow];
 }
 
+- (BOOL)isLike
+{
+    return [self.type isEqual:NoteTypeLike];
+}
+
+- (BOOL)isCommentLike
+{
+    return [self.type isEqual:NoteTypeCommentLike];
+}
+
 - (BOOL)isBadge
 {
     //  Note:
@@ -634,13 +711,20 @@ NSString const *NotePostIdKey           = @"post_id";
     //
     for (NotificationBlockGroup *group in self.bodyBlockGroups) {
         for (NotificationBlock *block in group.blocks) {
-            if (block.isBadge) {
-                return true;
+            for (NotificationMedia *media in block.media) {
+                if (media.isBadge) {
+                    return true;
+                }
             }
         }
     }
     
     return false;
+}
+
+- (BOOL)hasReply
+{
+    return self.isComment && self.metaReplyID != nil;
 }
 
 

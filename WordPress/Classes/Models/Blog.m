@@ -2,9 +2,13 @@
 #import "Post.h"
 #import "Comment.h"
 #import "WPAccount.h"
+#import "AccountService.h"
 #import "NSURL+IDN.h"
 #import "ContextManager.h"
 #import "Constants.h"
+#import "WordPress-Swift.h"
+#import "SFHFKeychainUtils.h"
+#import <WordPressApi/WordPressApi.h>
 
 static NSInteger const ImageSizeSmallWidth = 240;
 static NSInteger const ImageSizeSmallHeight = 180;
@@ -13,15 +17,24 @@ static NSInteger const ImageSizeMediumHeight = 360;
 static NSInteger const ImageSizeLargeWidth = 640;
 static NSInteger const ImageSizeLargeHeight = 480;
 
+NSString * const PostFormatStandard = @"standard";
+NSString * const ActiveModulesKeyPublicize = @"publicize";
+NSString * const ActiveModulesKeySharingButtons = @"sharedaddy";
+NSString * const OptionsKeyActiveModules = @"active_modules";
+NSString * const OptionsKeyPublicizeDisabled = @"publicize_permanently_disabled";
+
+
 @interface Blog ()
+
 @property (nonatomic, strong, readwrite) WPXMLRPCClient *api;
-@property (nonatomic, weak, readwrite) NSString *blavatarUrl;
+@property (nonatomic, strong, readwrite) JetpackState *jetpack;
+
 @end
 
 @implementation Blog
 
+@dynamic accountForDefaultBlog;
 @dynamic blogID;
-@dynamic blogName;
 @dynamic url;
 @dynamic xmlrpc;
 @dynamic apiKey;
@@ -29,29 +42,41 @@ static NSInteger const ImageSizeLargeHeight = 480;
 @dynamic hasOlderPages;
 @dynamic posts;
 @dynamic categories;
+@dynamic tags;
 @dynamic comments;
+@dynamic connections;
 @dynamic themes;
 @dynamic media;
+@dynamic menus;
+@dynamic menuLocations;
 @dynamic currentThemeId;
 @dynamic lastPostsSync;
 @dynamic lastStatsSync;
 @dynamic lastPagesSync;
 @dynamic lastCommentsSync;
 @dynamic lastUpdateWarning;
-@dynamic geolocationEnabled;
 @dynamic options;
+@dynamic postTypes;
 @dynamic postFormats;
 @dynamic isActivated;
 @dynamic visible;
 @dynamic account;
 @dynamic jetpackAccount;
+@dynamic isAdmin;
+@dynamic isMultiAuthor;
+@dynamic isHostedAtWPcom;
+@dynamic icon;
+@dynamic username;
+@dynamic settings;
+@dynamic planID;
+@dynamic sharingButtons;
+
 @synthesize api = _api;
-@synthesize blavatarUrl = _blavatarUrl;
 @synthesize isSyncingPosts;
 @synthesize isSyncingPages;
-@synthesize isSyncingComments;
 @synthesize videoPressEnabled;
 @synthesize isSyncingMedia;
+@synthesize jetpack = _jetpack;
 
 #pragma mark - NSManagedObject subclass methods
 
@@ -68,47 +93,31 @@ static NSInteger const ImageSizeLargeHeight = 480;
     [super didTurnIntoFault];
 
     // Clean up instance variables
-    self.blavatarUrl = nil;
     self.api = nil;
 
     [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
-#pragma mark -
-
-- (BOOL)geolocationEnabled
-{
-    BOOL tmpValue;
-
-    [self willAccessValueForKey:@"geolocationEnabled"];
-    tmpValue = [[self primitiveValueForKey:@"geolocationEnabled"] boolValue];
-    [self didAccessValueForKey:@"geolocationEnabled"];
-
-    return tmpValue;
-}
-
-- (void)setGeolocationEnabled:(BOOL)value
-{
-    [self willChangeValueForKey:@"geolocationEnabled"];
-    [self setPrimitiveValue:[NSNumber numberWithBool:value] forKey:@"geolocationEnabled"];
-    [self didChangeValueForKey:@"geolocationEnabled"];
-}
 
 #pragma mark -
 #pragma mark Custom methods
 
-- (NSString *)blavatarUrl
+- (NSString *)icon
 {
-    if (_blavatarUrl == nil) {
-        NSString *hostUrl = [[NSURL URLWithString:self.xmlrpc] host];
-        if (hostUrl == nil) {
-            hostUrl = self.xmlrpc;
-        }
+    [self willAccessValueForKey:@"icon"];
+    NSString *icon = [self primitiveValueForKey:@"icon"];
+    [self didAccessValueForKey:@"icon"];
 
-        _blavatarUrl = hostUrl;
+    if (icon) {
+        return icon;
     }
 
-    return _blavatarUrl;
+    // if the icon is not set we can use the host url to construct it
+    NSString *hostUrl = [[NSURL URLWithString:self.xmlrpc] host];
+    if (hostUrl == nil) {
+        hostUrl = self.xmlrpc;
+    }
+    return hostUrl;
 }
 
 // Used as a key to store passwords, if you change the algorithm, logins will break
@@ -204,7 +213,7 @@ static NSInteger const ImageSizeLargeHeight = 480;
         pendingComments = [self.managedObjectContext countForFetchRequest:request error:&error];
     } else {
         for (Comment *element in self.comments) {
-            if ( [@"hold" isEqualToString: element.status] ) {
+            if ( [CommentStatusPending isEqualToString:element.status] ) {
                 pendingComments++;
             }
         }
@@ -223,34 +232,91 @@ static NSInteger const ImageSizeLargeHeight = 480;
     return [[self.categories allObjects] sortedArrayUsingDescriptors:sortDescriptors];
 }
 
-- (NSArray *)sortedPostFormatNames
+- (NSArray *)sortedPostFormats
 {
-    NSMutableArray *sortedNames = [NSMutableArray arrayWithCapacity:[self.postFormats count]];
-
-    if ([self.postFormats count] != 0) {
-        id standardPostFormat = [self.postFormats objectForKey:@"standard"];
-        if (standardPostFormat) {
-            [sortedNames addObject:standardPostFormat];
-        }
-        [self.postFormats enumerateKeysAndObjectsUsingBlock:^(id key, id obj, BOOL *stop) {
-            if (![key isEqual:@"standard"]) {
-                [sortedNames addObject:obj];
-            }
-        }];
+    if ([self.postFormats count] == 0) {
+        return @[];
     }
+    NSMutableArray *sortedFormats = [NSMutableArray arrayWithCapacity:[self.postFormats count]];
+ 
+    if (self.postFormats[PostFormatStandard]) {
+        [sortedFormats addObject:PostFormatStandard];
+    }
+    [self.postFormats enumerateKeysAndObjectsUsingBlock:^(id key, id obj, BOOL *stop) {
+        if (![key isEqual:PostFormatStandard]) {
+            [sortedFormats addObject:key];
+        }
+    }];
 
-    return [NSArray arrayWithArray:sortedNames];
+    return [NSArray arrayWithArray:sortedFormats];
 }
 
-- (BOOL)isWPcom
+- (NSArray *)sortedPostFormatNames
+{    
+    return [[self sortedPostFormats] wp_map:^id(NSString *key) {
+        return self.postFormats[key];
+    }];
+}
+
+- (NSString *)defaultPostFormatText
 {
-    return self.account.isWpcom;
+    return [self postFormatTextFromSlug:self.settings.defaultPostFormat];
+}
+
+- (NSString *)postFormatTextFromSlug:(NSString *)postFormatSlug
+{
+    NSDictionary *allFormats = self.postFormats;
+    NSString *formatText = postFormatSlug;
+    if (postFormatSlug && allFormats[postFormatSlug]) {
+        formatText = allFormats[postFormatSlug];
+    }
+    // Default to standard if no name is found
+    if ((formatText == nil || [formatText isEqualToString:@""]) && allFormats[PostFormatStandard]) {
+        formatText = allFormats[PostFormatStandard];
+    }
+    return formatText;
 }
 
 // WP.COM private blog.
 - (BOOL)isPrivate
 {
-    return (self.isWPcom && [[self getOptionValue:@"blog_public"] isEqualToString:@"-1"]);
+    return (self.isHostedAtWPcom && [self.settings.privacy isEqualToNumber:@(SiteVisibilityPrivate)]);
+}
+
+- (SiteVisibility)siteVisibility
+{
+    switch ([self.settings.privacy integerValue]) {
+        case (SiteVisibilityHidden):
+            return SiteVisibilityHidden;
+            break;
+        case (SiteVisibilityPublic):
+            return SiteVisibilityPublic;
+            break;
+        case (SiteVisibilityPrivate):
+            return SiteVisibilityPrivate;
+            break;
+        default:
+            break;
+    }
+    return SiteVisibilityUnknown;
+}
+
+- (void)setSiteVisibility:(SiteVisibility)siteVisibility
+{
+    switch (siteVisibility) {
+        case (SiteVisibilityHidden):
+            self.settings.privacy = @(SiteVisibilityHidden);
+            break;
+        case (SiteVisibilityPublic):
+            self.settings.privacy = @(SiteVisibilityPublic);
+            break;
+        case (SiteVisibilityPrivate):
+            self.settings.privacy = @(SiteVisibilityPrivate);
+            break;
+        default:
+            NSParameterAssert(siteVisibility >= SiteVisibilityPrivate && siteVisibility <= SiteVisibilityPublic);
+            break;
+    }
 }
 
 - (NSDictionary *)getImageResizeDimensions
@@ -272,81 +338,14 @@ static NSInteger const ImageSizeLargeHeight = 480;
              @"largeSize": [NSValue valueWithCGSize:largeSize]};
 }
 
-- (void)dataSave
-{
-    [[ContextManager sharedInstance] saveContext:self.managedObjectContext];
-}
-
-- (void)remove
-{
-    DDLogInfo(@"<Blog:%@> remove", self.hostURL);
-    [self.api cancelAllHTTPOperations];
-    [self.managedObjectContext performBlock:^{
-        WPAccount *account = self.account;
-
-        NSManagedObjectContext *context = [self managedObjectContext];
-        [context deleteObject:self];
-        
-        [self removeSelfHostedAccountIfNeeded:account
-                                      context:context];
-        
-        [self dataSave];
-        [WPAnalytics refreshMetadata];
-    }];
-}
-
-/**
- *  @brief      For self hosted blogs, removes the account unless there are other associated blogs.
- *
- *  @param      account     The account to remove, if it matches the criteria.  Cannot be nil.
- *  @param      context     The context to use for the changes.  Cannot be nil.
- */
-- (void)removeSelfHostedAccountIfNeeded:(WPAccount*)account
-                                context:(NSManagedObjectContext*)context
-{
-    NSParameterAssert([account isKindOfClass:[WPAccount class]]);
-    NSParameterAssert([context isKindOfClass:[NSManagedObjectContext class]]);
-    
-    BOOL isWpComAccount = account && !account.isWpcom;
-    
-    if (isWpComAccount) {
-        BOOL accountOnlyHasThisBlog = ([account.blogs count] == 1
-                                       && [[account.blogs anyObject] isEqual:self]);
-        
-        if (accountOnlyHasThisBlog) {
-            [context deleteObject:account];
-        }
-    }
-}
-
 - (void)setXmlrpc:(NSString *)xmlrpc
 {
     [self willChangeValueForKey:@"xmlrpc"];
     [self setPrimitiveValue:xmlrpc forKey:@"xmlrpc"];
     [self didChangeValueForKey:@"xmlrpc"];
-    
-    self.blavatarUrl = nil;
 
     // Reset the api client so next time we use the new XML-RPC URL
     self.api = nil;
-}
-
-- (NSArray *)getXMLRPCArgsWithExtra:(id)extra
-{
-    NSMutableArray *result = [NSMutableArray array];
-    NSString *password = self.password ?: [NSString string];
-    
-    [result addObject:self.blogID];
-    [result addObject:self.username];
-    [result addObject:password];
-
-    if ([extra isKindOfClass:[NSArray class]]) {
-        [result addObjectsFromArray:extra];
-    } else if (extra != nil) {
-        [result addObject:extra];
-    }
-
-    return [NSArray arrayWithArray:result];
 }
 
 - (NSString *)version
@@ -354,25 +353,47 @@ static NSInteger const ImageSizeLargeHeight = 480;
     return [self getOptionValue:@"software_version"];
 }
 
-- (NSString *)username
-{
-    [self willAccessValueForKey:@"username"];
-
-    NSString *username = self.account.username ?: @"";
-
-    [self didAccessValueForKey:@"username"];
-
-    return username;
-}
-
 - (NSString *)password
 {
-    return self.account.password ?: @"";
+    return [SFHFKeychainUtils getPasswordForUsername:self.username andServiceName:self.xmlrpc error:nil];
+}
+
+- (void)setPassword:(NSString *)password
+{
+    NSAssert(self.username != nil, @"Can't set password if we don't know the username yet");
+    NSAssert(self.xmlrpc != nil, @"Can't set password if we don't know the XML-RPC endpoint yet");
+    if (password) {
+        [SFHFKeychainUtils storeUsername:self.username
+                             andPassword:password
+                          forServiceName:self.xmlrpc
+                          updateExisting:YES
+                                   error:nil];
+    } else {
+        [SFHFKeychainUtils deleteItemForUsername:self.username
+                                  andServiceName:self.xmlrpc
+                                           error:nil];
+    }
 }
 
 - (NSString *)authToken
 {
-    return self.account.authToken;
+    if (self.jetpackAccount) {
+        return self.jetpackAccount.authToken;
+    } else {
+        return self.account.authToken;
+    }
+}
+
+- (NSString *)usernameForSite
+{
+    if (self.username) {
+        return self.username;
+    } else if (self.account && self.isHostedAtWPcom) {
+        return self.account.username;
+    } else {
+        // FIXME: Figure out how to get the self hosted username when using Jetpack REST (@koke 2015-06-15)
+        return nil;
+    }
 }
 
 - (BOOL)supportsFeaturedImages
@@ -385,9 +406,164 @@ static NSInteger const ImageSizeLargeHeight = 480;
     return NO;
 }
 
+- (BOOL)supports:(BlogFeature)feature
+{
+    switch (feature) {
+        case BlogFeatureRemovable:
+            return ![self accountIsDefaultAccount];
+        case BlogFeatureVisibility:
+            /*
+             See -[BlogListViewController fetchRequestPredicateForHideableBlogs]
+             If the logic for this changes that needs to be updated as well
+             */
+            return [self accountIsDefaultAccount];
+        case BlogFeaturePeople:
+        case BlogFeatureWPComRESTAPI:
+            return [self restApi] != nil;
+        case BlogFeatureSharing:
+            return [self supportsSharing];
+        case BlogFeatureStats:
+            return [self restApiForStats] != nil;
+        case BlogFeatureCommentLikes:
+        case BlogFeatureReblog:
+        case BlogFeatureMentions:
+        case BlogFeatureOAuth2Login:
+        case BlogFeaturePlans:
+            return [self isHostedAtWPcom];
+        case BlogFeaturePushNotifications:
+            return [self supportsPushNotifications];
+        case BlogFeatureThemeBrowsing:
+            return [self isHostedAtWPcom] && [self isAdmin];
+        case BlogFeaturePrivate:
+            // Private visibility is only supported by wpcom blogs
+            return [self isHostedAtWPcom];
+        case BlogFeatureSiteManagement:
+            return [self supportsSiteManagementServices];
+    }
+}
+
+-(BOOL)supportsSharing
+{
+    return ([self supportsPublicize] || [self supportsShareButtons]) && [self isAdmin];
+}
+
+- (BOOL)supportsPublicize
+{
+    // Publicize is only supported via REST, and for admins
+    if (![self supports:BlogFeatureWPComRESTAPI]) {
+        return NO;
+    }
+
+    if (self.isHostedAtWPcom) {
+        // For WordPress.com YES unless it's disabled
+        return ![[self getOptionValue:OptionsKeyPublicizeDisabled] boolValue];
+
+    } else {
+        // For Jetpack, check if the module is enabled
+        return [self jetpackPublicizeModuleEnabled];
+    }
+}
+
+- (BOOL)supportsShareButtons
+{
+    // Share Button settings are only supported via REST, and for admins
+    if (![self supports:BlogFeatureWPComRESTAPI]) {
+        return NO;
+    }
+
+    if (self.isHostedAtWPcom) {
+        // For WordPress.com YES
+        return YES;
+
+    } else {
+        // For Jetpack, check if the module is enabled
+        return [self jetpackSharingButtonsModuleEnabled];
+    }
+}
+
+- (BOOL)supportsPushNotifications
+{
+    return [self accountIsDefaultAccount];
+}
+
+- (BOOL)accountIsDefaultAccount
+{
+    AccountService *accountService = [[AccountService alloc] initWithManagedObjectContext:self.managedObjectContext];
+    WPAccount *defaultAccount = [accountService defaultWordPressComAccount];
+    return [defaultAccount isEqual:self.account];
+}
+
+- (BOOL)jetpackAccountIsDefaultAccount
+{
+    AccountService *accountService = [[AccountService alloc] initWithManagedObjectContext:self.managedObjectContext];
+    WPAccount *defaultAccount = [accountService defaultWordPressComAccount];
+    return [defaultAccount isEqual:self.jetpackAccount];
+}
+
 - (NSNumber *)dotComID
 {
-    return self.blogID;
+    [self willAccessValueForKey:@"blogID"];
+    NSNumber *dotComID = [self primitiveValueForKey:@"blogID"];
+    if (dotComID.integerValue == 0) {
+        dotComID = self.jetpack.siteID;
+        if (dotComID.integerValue > 0) {
+            self.dotComID = dotComID;
+        }
+    }
+    [self didAccessValueForKey:@"blogID"];
+    return dotComID;
+}
+
+- (void)setDotComID:(NSNumber *)dotComID
+{
+    [self willChangeValueForKey:@"blogID"];
+    [self setPrimitiveValue:dotComID forKey:@"blogID"];
+    [self didChangeValueForKey:@"blogID"];
+}
+
+- (NSSet *)allowedFileTypes
+{
+    NSArray * allowedFileTypes = self.options[@"allowed_file_types"][@"value"];
+    if (!allowedFileTypes || allowedFileTypes.count == 0) {
+        return nil;
+    }
+    
+    return [NSSet setWithArray:allowedFileTypes];
+}
+
+- (void)setOptions:(NSDictionary *)options
+{
+    [self willChangeValueForKey:@"options"];
+    [self setPrimitiveValue:options forKey:@"options"];
+    // Invalidate the Jetpack state since it's constructed from options
+    self.jetpack = nil;
+    [self didChangeValueForKey:@"options"];
+
+    self.siteVisibility = (SiteVisibility)([[self getOptionValue:@"blog_public"] integerValue]);
+    // HACK:Sergio Estevao (2015-08-31): Because there is no direct way to
+    // know if a user has permissions to change the options we check if the blog title property is read only or not.
+    // (Moved from BlogService, 2016-01-28 by aerych)
+    if ([self.options numberForKeyPath:@"blog_title.readonly"]) {
+        self.isAdmin = ![[self.options numberForKeyPath:@"blog_title.readonly"] boolValue];
+    }
+}
+
++ (NSSet *)keyPathsForValuesAffectingJetpack
+{
+    return [NSSet setWithObject:@"options"];
+}
+
+- (NSString *)logDescription
+{
+    NSString *extra = @"";
+    if (self.account) {
+        extra = [NSString stringWithFormat:@" wp.com account: %@ blogId: %@", self.account ? self.account.username : @"NO", self.dotComID];
+    } else if (self.jetpackAccount) {
+        extra = [NSString stringWithFormat:@" jetpack: 🚀🚀 Jetpack %@ fully connected as %@ with site ID %@", self.jetpack.version, self.jetpackAccount.username, self.jetpack.siteID];
+    } else {
+        extra = [NSString stringWithFormat:@" jetpack: %@", [self.jetpack description]];
+    }
+    return [NSString stringWithFormat:@"<Blog Name: %@ URL: %@ XML-RPC: %@%@>", self.settings.name, self.url, self.xmlrpc, extra];
 }
 
 #pragma mark - api accessor
@@ -397,7 +573,7 @@ static NSInteger const ImageSizeLargeHeight = 480;
     if (_api == nil) {
         _api = [[WPXMLRPCClient alloc] initWithXMLRPCEndpoint:[NSURL URLWithString:self.xmlrpc]];
         // Enable compression for wp.com only, as some self hosted have connection issues
-        if (self.isWPcom) {
+        if ([self isHostedAtWPcom]) {
             [_api setDefaultHeader:@"Accept-Encoding" value:@"gzip, deflate"];
             [_api setAuthorizationHeaderWithToken:self.account.authToken];
         }
@@ -407,7 +583,7 @@ static NSInteger const ImageSizeLargeHeight = 480;
 
 - (WordPressComApi *)restApi
 {
-    if (self.isWPcom) {
+    if (self.account) {
         return self.account.restApi;
     } else if ([self jetpackRESTSupported]) {
         return self.jetpackAccount.restApi;
@@ -415,9 +591,61 @@ static NSInteger const ImageSizeLargeHeight = 480;
     return nil;
 }
 
+/*
+ 2015-05-26 koke: this is a temporary method to check if a blog supports BlogFeatureStats.
+ It works like restApi, but bypasses Jetpack REST checks, since we always want to use rest for Stats.
+ */
+- (WordPressComApi *)restApiForStats
+{
+    if (self.account) {
+        return self.account.restApi;
+    } else if (self.jetpackAccount && self.dotComID) {
+        return self.jetpackAccount.restApi;
+    }
+    return nil;
+}
+
+#pragma mark - Jetpack
+
+- (JetpackState *)jetpack
+{
+    if (_jetpack) {
+        return _jetpack;
+    }
+    if ([self.options count] == 0) {
+        return nil;
+    }
+    _jetpack = [JetpackState new];
+    _jetpack.siteID = [[self getOptionValue:@"jetpack_client_id"] numericValue];
+    _jetpack.version = [self getOptionValue:@"jetpack_version"];
+    if (self.jetpackAccount.username) {
+        _jetpack.connectedUsername = self.jetpackAccount.username;
+    } else {
+        _jetpack.connectedUsername = [self getOptionValue:@"jetpack_user_login"];
+    }
+    _jetpack.connectedEmail = [self getOptionValue:@"jetpack_user_email"];
+    return _jetpack;
+}
+
 - (BOOL)jetpackRESTSupported
 {
-    return WPJetpackRESTEnabled && self.jetpackAccount && self.dotComID;
+    return self.jetpackAccount && self.dotComID;
+}
+
+- (BOOL)jetpackActiveModule:(NSString *)moduleName
+{
+    NSArray *activeModules = (NSArray *)[self getOptionValue:OptionsKeyActiveModules];
+    return [activeModules containsObject:moduleName] ?: NO;
+}
+
+- (BOOL)jetpackPublicizeModuleEnabled
+{
+    return [self jetpackActiveModule:ActiveModulesKeyPublicize];
+}
+
+- (BOOL)jetpackSharingButtonsModuleEnabled
+{
+    return [self jetpackActiveModule:ActiveModulesKeySharingButtons];
 }
 
 #pragma mark - Private Methods

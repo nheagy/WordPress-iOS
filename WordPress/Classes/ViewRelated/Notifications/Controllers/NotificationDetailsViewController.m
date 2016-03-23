@@ -14,7 +14,8 @@
 #import "ReaderSiteService.h"
 
 #import "WPWebViewController.h"
-#import "ReaderPostDetailViewController.h"
+#import "WPImageViewController.h"
+
 #import "ReaderCommentsViewController.h"
 #import "StatsViewController.h"
 #import "StatsViewAllTableViewController.h"
@@ -30,11 +31,11 @@
 
 #import "NSURL+Util.h"
 #import "NSScanner+Helpers.h"
-#import "UIActionSheet+Helpers.h"
-#import "UIAlertView+Blocks.h"
 #import "NSObject+Helpers.h"
 #import "NSDate+StringFormatting.h"
 #import "NSString+Helpers.h"
+
+#import "WPAppAnalytics.h"
 
 
 
@@ -44,9 +45,6 @@
 
 static UIEdgeInsets NotificationTableInsetsPhone        = {0.0f,  0.0f, 20.0f, 0.0f};
 static UIEdgeInsets NotificationTableInsetsPad          = {40.0f, 0.0f, 20.0f, 0.0f};
-
-static UIEdgeInsets NotificationHeaderSeparatorInsets   = {0.0f,  0.0f,  0.0f, 0.0f};
-static UIEdgeInsets NotificationBlockSeparatorInsets    = {0.0f, 12.0f,  0.0f, 0.0f};
 
 static NSTimeInterval NotificationFiveMinutes           = 60 * 5;
 static NSInteger NotificationSectionCount               = 1;
@@ -72,7 +70,6 @@ static NSString *NotificationsCommentIdKey              = @"NotificationsComment
 @property (nonatomic, strong) NSDictionary                  *layoutCellMap;
 @property (nonatomic, strong) NSDictionary                  *reuseIdentifierMap;
 @property (nonatomic, strong) NSArray                       *blockGroups;
-@property (nonatomic, assign) UIEdgeInsets                  firstRowInsets;
 
 // Media Helpers
 @property (nonatomic, strong) NotificationMediaDownloader   *mediaDownloader;
@@ -90,50 +87,37 @@ static NSString *NotificationsCommentIdKey              = @"NotificationsComment
 
 - (void)dealloc
 {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    
     // Failsafe: Manually nuke the tableView dataSource and delegate. Make sure not to force a loadView event!
     if (!self.isViewLoaded) {
         return;
     }
     
-    self.tableView.delegate = nil;
-    self.tableView.dataSource = nil;
+    _tableView.delegate = nil;
+    _tableView.dataSource = nil;
+}
+
+- (instancetype)initWithCoder:(NSCoder *)aDecoder
+{
+    self = [super initWithCoder:aDecoder];
+    if (self) {
+        self.restorationClass = [self class];
+    }
+    
+    return self;
 }
 
 - (void)viewDidLoad
 {
     [super viewDidLoad];
     
-    self.title                              = self.note.title;
-    self.restorationClass                   = [self class];
-    self.view.backgroundColor               = [WPStyleGuide itsEverywhereGrey];
+    [self setupNavigationBar];
+    [self setupMainView];
+    [self setupTableView];
+    [self setupMediaDownloader];
+    [self setupNotificationListeners];
     
-    // Don't show the notification title in the next-view's back button
-    UIBarButtonItem *backButton = [[UIBarButtonItem alloc] initWithTitle:[NSString string] style:UIBarButtonItemStylePlain target:nil action:nil];
-    self.navigationItem.backBarButtonItem   = backButton;
-
-    self.tableView.separatorStyle           = self.note.isBadge ? UITableViewCellSeparatorStyleNone : UITableViewCellSeparatorStyleSingleLine;
-    self.tableView.backgroundColor          = [WPStyleGuide itsEverywhereGrey];
-    self.tableView.accessibilityIdentifier  = @"Notification Details Table";
-    self.tableView.separatorInset           = UIEdgeInsetsZero;
-    self.tableView.separatorColor           = [WPStyleGuide notificationsBlockSeparatorColor];
-    self.tableView.backgroundColor          = [WPStyleGuide itsEverywhereGrey];
-    
-    self.mediaDownloader                    = [[NotificationMediaDownloader alloc] initWithMaximumImageWidth:self.maxMediaEmbedWidth];
-
-    self.reuseIdentifierMap = @{
-        @(NoteBlockGroupTypeHeader)    : NoteBlockHeaderTableViewCell.reuseIdentifier,
-        @(NoteBlockGroupTypeText)      : NoteBlockTextTableViewCell.reuseIdentifier,
-        @(NoteBlockGroupTypeComment)   : NoteBlockCommentTableViewCell.reuseIdentifier,
-        @(NoteBlockGroupTypeImage)     : NoteBlockImageTableViewCell.reuseIdentifier,
-        @(NoteBlockGroupTypeUser)      : NoteBlockUserTableViewCell.reuseIdentifier
-    };
-    
-    NSManagedObjectContext *context = self.note.managedObjectContext;
-    [[NSNotificationCenter defaultCenter] addObserver:self
-                                             selector:@selector(handleNotificationChange:)
-                                                 name:NSManagedObjectContextObjectsDidChangeNotification
-                                               object:context];
-
     [AppRatingUtility incrementSignificantEventForSection:@"notifications"];
 }
 
@@ -163,16 +147,20 @@ static NSString *NotificationsCommentIdKey              = @"NotificationsComment
 {
     [super viewDidLayoutSubviews];
     [self adjustTableInsetsIfNeeded];
-    [self adjustTableSeparatorsIfNeeded];
+}
+
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection
+{
+    [super traitCollectionDidChange:previousTraitCollection];
+    [self.tableView reloadData];
 }
 
 - (void)reloadData
 {
     // Hide the header, if needed
     NSMutableArray *blockGroups = [NSMutableArray array];
-    BOOL hasHeaderBlocks        = (_note.headerBlockGroup != nil);
     
-    if (hasHeaderBlocks) {
+    if (_note.headerBlockGroup) {
         [blockGroups addObject:_note.headerBlockGroup];
     }
     
@@ -180,9 +168,10 @@ static NSString *NotificationsCommentIdKey              = @"NotificationsComment
         [blockGroups addObjectsFromArray:_note.bodyBlockGroups];
     }
     
-    self.firstRowInsets = hasHeaderBlocks ? NotificationHeaderSeparatorInsets : NotificationBlockSeparatorInsets;
-    self.blockGroups    = blockGroups;
+    self.blockGroups = blockGroups;
     
+    // Reload UI
+    self.title = self.note.title;
     [self.tableView reloadData];
     [self adjustTableInsetsIfNeeded];
 }
@@ -199,6 +188,66 @@ static NSString *NotificationsCommentIdKey              = @"NotificationsComment
 }
 
 
+#pragma mark - Setup Helpers
+
+- (void)setupNavigationBar
+{
+    // Don't show the notification title in the next-view's back button
+    self.navigationItem.backBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:[NSString string]
+                                                                             style:UIBarButtonItemStylePlain
+                                                                            target:nil
+                                                                            action:nil];
+}
+
+- (void)setupMainView
+{
+    self.view.backgroundColor = [WPStyleGuide itsEverywhereGrey];
+}
+
+- (void)setupTableView
+{
+    // Register Cell Nibs
+    NSArray *cellClassNames = @[
+        NSStringFromClass([NoteBlockHeaderTableViewCell class]),
+        NSStringFromClass([NoteBlockTextTableViewCell class]),
+        NSStringFromClass([NoteBlockActionsTableViewCell class]),
+        NSStringFromClass([NoteBlockCommentTableViewCell class]),
+        NSStringFromClass([NoteBlockImageTableViewCell class]),
+        NSStringFromClass([NoteBlockUserTableViewCell class])
+    ];
+    
+    for (NSString *cellClassName in cellClassNames) {
+        Class cellClass                     = NSClassFromString(cellClassName);
+        NSString *className                 = [cellClass classNameWithoutNamespaces];
+        UINib *tableViewCellNib             = [UINib nibWithNibName:className bundle:[NSBundle mainBundle]];
+        
+        [self.tableView registerNib:tableViewCellNib forCellReuseIdentifier:[cellClass reuseIdentifier]];
+        [self.tableView registerNib:tableViewCellNib forCellReuseIdentifier:[cellClass layoutIdentifier]];
+    }
+    
+    // TableView
+    self.tableView.separatorStyle           = UITableViewCellSeparatorStyleNone;
+    self.tableView.backgroundColor          = [WPStyleGuide greyLighten30];
+    self.tableView.accessibilityIdentifier  = @"Notification Details Table";
+    self.tableView.backgroundColor          = [WPStyleGuide itsEverywhereGrey];
+    self.tableView.keyboardDismissMode      = UIScrollViewKeyboardDismissModeInteractive;
+}
+
+- (void)setupMediaDownloader
+{
+    self.mediaDownloader = [NotificationMediaDownloader new];
+}
+
+- (void)setupNotificationListeners
+{
+    NSManagedObjectContext *context = self.note.managedObjectContext;
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(handleNotificationChange:)
+                                                 name:NSManagedObjectContextObjectsDidChangeNotification
+                                               object:context];
+}
+
+
 #pragma mark - Autolayout Helpers
 
 - (NSDictionary *)layoutCellMap
@@ -207,28 +256,33 @@ static NSString *NotificationsCommentIdKey              = @"NotificationsComment
         return _layoutCellMap;
     }
     
-    NSString *storyboardID  = NSStringFromClass([self class]);
-    NotificationDetailsViewController *detailsViewController = [self.storyboard instantiateViewControllerWithIdentifier:storyboardID];
-    
-    [detailsViewController loadView];
-    
-    UITableView *tableView  = detailsViewController.tableView;
-
+    UITableView *tableView  = self.tableView;
     _layoutCellMap = @{
-        @(NoteBlockGroupTypeHeader)    : [tableView dequeueReusableCellWithIdentifier:NoteBlockHeaderTableViewCell.reuseIdentifier],
-        @(NoteBlockGroupTypeText)      : [tableView dequeueReusableCellWithIdentifier:NoteBlockTextTableViewCell.reuseIdentifier],
-        @(NoteBlockGroupTypeComment)   : [tableView dequeueReusableCellWithIdentifier:NoteBlockCommentTableViewCell.reuseIdentifier],
-        @(NoteBlockGroupTypeImage)     : [tableView dequeueReusableCellWithIdentifier:NoteBlockImageTableViewCell.reuseIdentifier],
-        @(NoteBlockGroupTypeUser)      : [tableView dequeueReusableCellWithIdentifier:NoteBlockUserTableViewCell.reuseIdentifier]
+        @(NoteBlockGroupTypeHeader)    : [tableView dequeueReusableCellWithIdentifier:NoteBlockHeaderTableViewCell.layoutIdentifier],
+        @(NoteBlockGroupTypeFooter)    : [tableView dequeueReusableCellWithIdentifier:NoteBlockTextTableViewCell.layoutIdentifier],
+        @(NoteBlockGroupTypeText)      : [tableView dequeueReusableCellWithIdentifier:NoteBlockTextTableViewCell.layoutIdentifier],
+        @(NoteBlockGroupTypeComment)   : [tableView dequeueReusableCellWithIdentifier:NoteBlockCommentTableViewCell.layoutIdentifier],
+        @(NoteBlockGroupTypeActions)   : [tableView dequeueReusableCellWithIdentifier:NoteBlockActionsTableViewCell.layoutIdentifier],
+        @(NoteBlockGroupTypeImage)     : [tableView dequeueReusableCellWithIdentifier:NoteBlockImageTableViewCell.layoutIdentifier],
+        @(NoteBlockGroupTypeUser)      : [tableView dequeueReusableCellWithIdentifier:NoteBlockUserTableViewCell.layoutIdentifier]
     };
     
     return _layoutCellMap;
 }
 
-- (BOOL)isLayoutCell:(UITableViewCell *)cell
+- (NSDictionary *)reuseIdentifierMap
 {
-    return [self.layoutCellMap.allValues containsObject:cell];
+    return @{
+        @(NoteBlockGroupTypeHeader)     : NoteBlockHeaderTableViewCell.reuseIdentifier,
+        @(NoteBlockGroupTypeFooter)     : NoteBlockTextTableViewCell.reuseIdentifier,
+        @(NoteBlockGroupTypeText)       : NoteBlockTextTableViewCell.reuseIdentifier,
+        @(NoteBlockGroupTypeComment)    : NoteBlockCommentTableViewCell.reuseIdentifier,
+        @(NoteBlockGroupTypeActions)    : NoteBlockActionsTableViewCell.reuseIdentifier,
+        @(NoteBlockGroupTypeImage)      : NoteBlockImageTableViewCell.reuseIdentifier,
+        @(NoteBlockGroupTypeUser)       : NoteBlockUserTableViewCell.reuseIdentifier
+    };
 }
+
 
 #pragma mark - Reply View Helpers
 
@@ -354,17 +408,6 @@ static NSString *NotificationsCommentIdKey              = @"NotificationsComment
     self.tableView.contentInset = contentInset;
 }
 
-- (void)adjustTableSeparatorsIfNeeded
-{
-    if ([self.tableView respondsToSelector:@selector(setSeparatorInset:)]) {
-        [self.tableView setSeparatorInset:UIEdgeInsetsZero];
-    }
-    
-    if ([self.tableView respondsToSelector:@selector(setLayoutMargins:)]) {
-        [self.tableView setLayoutMargins:UIEdgeInsetsZero];
-    }
-}
-
 
 #pragma mark - UIViewController Restoration
 
@@ -464,22 +507,12 @@ static NSString *NotificationsCommentIdKey              = @"NotificationsComment
     NotificationBlockGroup *blockGroup      = [self blockGroupForIndexPath:indexPath];
     NoteBlockTableViewCell *tableViewCell   = self.layoutCellMap[@(blockGroup.type)] ?: self.layoutCellMap[@(NoteBlockGroupTypeText)];
 
+    [self downloadAndResizeMedia:indexPath blockGroup:blockGroup];
     [self setupCell:tableViewCell blockGroup:blockGroup];
-
+    
     CGFloat height = [tableViewCell layoutHeightWithWidth:CGRectGetWidth(self.tableView.bounds)];
-    
-    return height;
-}
 
-- (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath
-{
-    UIEdgeInsets separatorInsets            = (indexPath.row == 0) ? self.firstRowInsets : NotificationBlockSeparatorInsets;
-    cell.separatorInset                     = separatorInsets;
-    
-    // iOS 8 Only!
-    if ([cell respondsToSelector:@selector(setLayoutMargins:)]) {
-        cell.layoutMargins = separatorInsets;
-    }
+    return height;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath
@@ -488,9 +521,9 @@ static NSString *NotificationsCommentIdKey              = @"NotificationsComment
     NSString *reuseIdentifier               = self.reuseIdentifierMap[@(blockGroup.type)] ?: self.reuseIdentifierMap[@(NoteBlockGroupTypeText)];
     NoteBlockTableViewCell *cell            = [tableView dequeueReusableCellWithIdentifier:reuseIdentifier forIndexPath:indexPath];
  
-    [self enqueueMediaDownloads:blockGroup indexPath:indexPath];
+    [self setupSeparators:cell indexPath:indexPath];
     [self setupCell:cell blockGroup:blockGroup];
-
+    
     return cell;
 }
 
@@ -502,42 +535,61 @@ static NSString *NotificationsCommentIdKey              = @"NotificationsComment
     if (group.type == NoteBlockGroupTypeUser) {
         
         NotificationBlock *block    = [group blockOfType:NoteBlockTypeUser];
-        NSURL *homeURL              = [NSURL URLWithString:block.metaLinksHome];
-        
-        [self openURL:homeURL];
+        NSURL *siteURL              = [NSURL URLWithString:block.metaLinksHome];
+        [self openURL:siteURL];
         
     // Header-Level: Push the resource associated with the note
     } else if (group.type == NoteBlockGroupTypeHeader) {
         
         [self openNotificationHeader:group];
+
+    // Footer-Level:
+    } else if (group.type == NoteBlockGroupTypeFooter) {
+        
+        // Note:
+        // By convention, the last range is the one that always contains the targetURL.
+        //
+        NotificationBlock *block    = [group blockOfType:NoteBlockTypeText];
+        NotificationRange *range    = block.ranges.lastObject;
+        
+        [self openURL:range.url];
     }
 }
 
 
 #pragma mark - Media Download Helper
 
-- (void)enqueueMediaDownloads:(NotificationBlockGroup *)group indexPath:(NSIndexPath *)indexPath
+- (void)downloadAndResizeMedia:(NSIndexPath *)indexPath blockGroup:(NotificationBlockGroup *)blockGroup
 {
-    // Download Media: Only embeds for Text and Comment notifications
+    //  Notes:
+    //  -   We'll *only* download Media for Text and Comment Blocks
+    //  -   Plus, we'll also resize the downloaded media cache *if needed*. This is meant to adjust images to
+    //      better fit onscreen, whenever the device orientation changes (and in turn, the maxMediaEmbedWidth changes too).
+    //
     NSSet *richBlockTypes           = [NSSet setWithObjects:@(NoteBlockTypeText), @(NoteBlockTypeComment), nil];
-    NSSet *imageUrls                = [group imageUrlsForBlocksOfTypes:richBlockTypes];
+    NSSet *imageUrls                = [blockGroup imageUrlsForBlocksOfTypes:richBlockTypes];
     __weak __typeof(self) weakSelf  = self;
     
-    [self.mediaDownloader downloadMediaWithUrls:imageUrls completion:^{
-        [weakSelf.tableView reloadRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationFade];
-    }];
+    void (^completion)(void)        = ^{
+        
+        // Workaround:
+        // Performing the reload call, multiple times, without the UIViewAnimationOptionBeginFromCurrentState might lead
+        // to a state in which the cell remains not visible.
+        //
+        [UIView animateWithDuration:0.25 delay:0.0 options:UIViewAnimationOptionOverrideInheritedDuration | UIViewAnimationOptionBeginFromCurrentState animations:^{
+            [weakSelf.tableView reloadRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationFade];
+        } completion:nil];
+    };
+
+    [self.mediaDownloader downloadMediaWithUrls:imageUrls maximumWidth:self.maxMediaEmbedWidth completion:completion];
+    [self.mediaDownloader resizeMediaWithIncorrectSize:self.maxMediaEmbedWidth completion:completion];
 }
 
 - (CGFloat)maxMediaEmbedWidth
 {
-    // Maximum Media Embed Width should match with the RichTextView's width in portrait mode
-    NoteBlockTextTableViewCell *textCell = self.layoutCellMap[@(NoteBlockGroupTypeText)];
-    NSAssert(textCell, @"Missing TextCell?");
-    
-    // Note: First iteration doesn't support embed resize on rotation. Let's take the portrait width
-    CGRect bounds           = self.view.bounds;
-    CGFloat portraitWidth   = [UIDevice isPad] ? WPTableViewFixedWidth : MIN(CGRectGetWidth(bounds), CGRectGetHeight(bounds));
-    CGFloat maxWidth        = portraitWidth - textCell.labelPadding.left - textCell.labelPadding.right;
+    UIEdgeInsets textPadding        = NoteBlockTextTableViewCell.defaultLabelPadding;
+    CGFloat portraitWidth           = [UIDevice isPad] ? WPTableViewFixedWidth : CGRectGetWidth(self.view.bounds);
+    CGFloat maxWidth                = portraitWidth - (textPadding.left + textPadding.right);
     
     return maxWidth;
 }
@@ -550,12 +602,18 @@ static NSString *NotificationsCommentIdKey              = @"NotificationsComment
     // Note: This is gonna look awesome in Swift
     if (blockGroup.type == NoteBlockGroupTypeHeader) {
         [self setupHeaderCell:(NoteBlockHeaderTableViewCell *)cell blockGroup:blockGroup];
-        
+
+    } else if (blockGroup.type == NoteBlockGroupTypeFooter) {
+        [self setupFooterCell:(NoteBlockTextTableViewCell *)cell blockGroup:blockGroup];
+            
     } else if (blockGroup.type == NoteBlockGroupTypeUser) {
         [self setupUserCell:(NoteBlockUserTableViewCell *)cell blockGroup:blockGroup];
         
     } else if (blockGroup.type == NoteBlockGroupTypeComment){
         [self setupCommentCell:(NoteBlockCommentTableViewCell *)cell blockGroup:blockGroup];
+
+    } else if (blockGroup.type == NoteBlockGroupTypeActions){
+        [self setupActionsCell:(NoteBlockActionsTableViewCell *)cell blockGroup:blockGroup];
         
     } else if (blockGroup.type == NoteBlockGroupTypeImage) {
         [self setupImageCell:(NoteBlockImageTableViewCell *)cell blockGroup:blockGroup];
@@ -576,45 +634,60 @@ static NSString *NotificationsCommentIdKey              = @"NotificationsComment
     
     NotificationBlock *gravatarBlock    = [blockGroup blockOfType:NoteBlockTypeImage];
     NotificationBlock *snippetBlock     = [blockGroup blockOfType:NoteBlockTypeText];
-    NotificationMedia *media            = gravatarBlock.media.firstObject;
     
     cell.attributedHeaderTitle          = gravatarBlock.attributedHeaderTitleText;
     cell.headerDetails                  = snippetBlock.text;
     
-    if ([self isLayoutCell:cell]) {
+    // Download the Gravatar (If Needed!)
+    if (cell.isLayoutCell) {
         return;
     }
-    
+
+    NotificationMedia *media            = gravatarBlock.media.firstObject;
     [cell downloadGravatarWithURL:media.mediaURL];
+}
+
+- (void)setupFooterCell:(NoteBlockTextTableViewCell *)cell blockGroup:(NotificationBlockGroup *)blockGroup
+{
+    NotificationBlock *textBlock    = blockGroup.blocks.firstObject;
+    NSAssert(textBlock, @"Missing Text Block for Notification %@", self.note.simperiumKey);
+    
+    // Setup the Cell
+    cell.attributedText             = textBlock.attributedFooterText;
+    cell.isTextViewSelectable       = false;
+    cell.isTextViewClickable        = false;
 }
 
 - (void)setupUserCell:(NoteBlockUserTableViewCell *)cell blockGroup:(NotificationBlockGroup *)blockGroup
 {
     NotificationBlock *userBlock    = blockGroup.blocks.firstObject;
-    NotificationMedia *media        = [userBlock.media firstObject];
-    BOOL hasHomeURL                 = (userBlock.metaLinksHome != nil);
-    BOOL hasHomeTitle               = (userBlock.metaTitlesHome.length > 0);
-
     NSAssert(userBlock, @"Missing User Block for Notification %@", self.note.simperiumKey);
     
-    __weak __typeof(self) weakSelf  = self;
+    BOOL hasHomeURL                 = (userBlock.metaLinksHome != nil);
+    BOOL hasHomeTitle               = (userBlock.metaTitlesHome.length > 0);
     
+    // Setup the Cell
     cell.accessoryType              = hasHomeURL ? UITableViewCellAccessoryDisclosureIndicator : UITableViewCellAccessoryNone;
     cell.name                       = userBlock.text;
     cell.blogTitle                  = hasHomeTitle ? userBlock.metaTitlesHome : userBlock.metaLinksHome.hostname;
     cell.isFollowEnabled            = [userBlock isActionEnabled:NoteActionFollowKey];
     cell.isFollowOn                 = [userBlock isActionOn:NoteActionFollowKey];
+    
+    // Setup the Callbacks
+    __weak __typeof(self) weakSelf  = self;
     cell.onFollowClick              = ^() {
         [weakSelf followSiteWithBlock:userBlock];
     };
     cell.onUnfollowClick            = ^() {
         [weakSelf unfollowSiteWithBlock:userBlock];
     };
-    
-    if ([self isLayoutCell:cell]) {
+
+    // Download the Gravatar (If Needed!)
+    if (cell.isLayoutCell) {
         return;
     }
 
+    NotificationMedia *media        = [userBlock.media firstObject];
     [cell downloadGravatarWithURL:media.mediaURL];
 }
 
@@ -631,20 +704,53 @@ static NSString *NotificationsCommentIdKey              = @"NotificationsComment
     
     NotificationBlock *commentBlock = [blockGroup blockOfType:NoteBlockTypeComment];
     NotificationBlock *userBlock    = [blockGroup blockOfType:NoteBlockTypeUser];
-    NotificationMedia *media        = userBlock.media.firstObject;
     NSAssert(commentBlock, @"Missing Comment Block for Notification %@", self.note.simperiumKey);
     NSAssert(userBlock,    @"Missing User Block for Notification %@",    self.note.simperiumKey);
     
     // Merge the Attachments with their ranges: [NSRange: UIImage]
     NSDictionary *mediaMap          = [self.mediaDownloader imagesForUrls:commentBlock.imageUrls];
     NSDictionary *mediaRanges       = [commentBlock buildRangesToImagesMap:mediaMap];
+    NSAttributedString *text        = [commentBlock.attributedRichText stringByEmbeddingImageAttachments:mediaRanges];
     
-    // Timestamp: Append bullet character if we have a site title or url to show
-    NSString *site                  = userBlock.metaTitlesHome ?: userBlock.metaLinksHome.hostname;
-    NSString *timestamp             = [self.note.timestampAsDate shortString];
-    if (site) {
-        timestamp = [timestamp stringByAppendingString:@" • "];
+    // Setup the cell
+    cell.name                       = userBlock.text;
+    cell.timestamp                  = [self.note.timestampAsDate shortString];
+    cell.site                       = userBlock.metaTitlesHome ?: userBlock.metaLinksHome.hostname;
+    cell.attributedCommentText      = [text trimTrailingNewlines];
+    cell.isApproved                 = [commentBlock isCommentApproved];
+    cell.hasReply                   = self.note.hasReply;
+    
+    // Setup the Callbacks
+    __weak __typeof(self) weakSelf  = self;
+    
+    cell.onDetailsClick             = ^(UIButton * sender) {
+        NSURL *url = [NSURL URLWithString:userBlock.metaLinksHome];
+        if (url) {
+            [weakSelf openURL:url];
+        }
+    };
+    
+    cell.onUrlClick                 = ^(NSURL *url) {
+        [weakSelf openURL:url];
+    };
+
+    cell.onAttachmentClick          = ^(NSTextAttachment *attachment) {
+        [weakSelf displayFullscreenImage:attachment.image];
+    };
+    
+    // Download the Gravatar (If Needed!)
+    if (cell.isLayoutCell) {
+        return;
     }
+    
+    NotificationMedia *media        = userBlock.media.firstObject;
+    [cell downloadGravatarWithURL:media.mediaURL];
+}
+
+- (void)setupActionsCell:(NoteBlockActionsTableViewCell *)cell blockGroup:(NotificationBlockGroup *)blockGroup
+{
+    NotificationBlock *commentBlock = [blockGroup blockOfType:NoteBlockTypeComment];
+    NSAssert(commentBlock, @"Missing Comment Block for Notification %@", self.note.simperiumKey);
     
     // Setup the cell
     cell.isReplyEnabled             = [UIDevice isPad] && [commentBlock isActionOn:NoteActionReplyKey];
@@ -656,28 +762,21 @@ static NSString *NotificationsCommentIdKey              = @"NotificationsComment
     cell.isLikeOn                   = [commentBlock isActionOn:NoteActionLikeKey];
     cell.isApproveOn                = [commentBlock isActionOn:NoteActionApproveKey];
     
-    cell.name                       = userBlock.text;
-    cell.attributedCommentText      = [commentBlock.attributedRichText stringByEmbeddingImageAttachments:mediaRanges];
-    cell.timestamp                  = timestamp;
-    cell.site                       = site;
-    
     // Setup the Callbacks
     __weak __typeof(self) weakSelf  = self;
-    cell.onUrlClick                 = ^(NSURL *url){
-        [weakSelf openURL:url];
-    };
+    
     cell.onReplyClick               = ^(UIButton * sender){
         [weakSelf editReplyWithBlock:commentBlock];
     };
-    
+
     cell.onLikeClick                = ^(UIButton * sender){
         [weakSelf likeCommentWithBlock:commentBlock];
     };
-    
+
     cell.onUnlikeClick              = ^(UIButton * sender){
         [weakSelf unlikeCommentWithBlock:commentBlock];
     };
-    
+
     cell.onApproveClick             = ^(UIButton * sender){
         [weakSelf approveCommentWithBlock:commentBlock];
     };
@@ -685,45 +784,27 @@ static NSString *NotificationsCommentIdKey              = @"NotificationsComment
     cell.onUnapproveClick           = ^(UIButton * sender){
         [weakSelf unapproveCommentWithBlock:commentBlock];
     };
-    
+
     cell.onTrashClick               = ^(UIButton * sender){
         [weakSelf trashCommentWithBlock:commentBlock];
     };
-    
+
     cell.onSpamClick                = ^(UIButton * sender){
         [weakSelf spamCommentWithBlock:commentBlock];
     };
-
-    cell.onSiteClick                = ^(UIButton * sender){
-        if (!userBlock.metaLinksHome) {
-            return;
-        }
-
-        NSURL *url = [[NSURL alloc] initWithString:userBlock.metaLinksHome];
-        if (url) {
-            [weakSelf openURL:url];
-        }
-    };
-
-    if ([self isLayoutCell:cell]) {
-        return;
-    }
-
-    [cell downloadGravatarWithURL:media.mediaURL];
 }
 
 - (void)setupImageCell:(NoteBlockImageTableViewCell *)cell blockGroup:(NotificationBlockGroup *)blockGroup
 {
+    // Download the Image (If Needed!)
+    if (cell.isLayoutCell) {
+        return;
+    }
+    
     NotificationBlock *imageBlock   = blockGroup.blocks.firstObject;
     NSAssert(imageBlock, @"Missing Image Block for Notification %@", self.note.simperiumKey);
     
     NotificationMedia *media        = imageBlock.media.firstObject;
-    cell.isBadge                    = media.isBadge;
-    
-    if ([self isLayoutCell:cell]) {
-        return;
-    }
-
     [cell downloadImageWithURL:media.mediaURL];
 }
 
@@ -737,17 +818,25 @@ static NSString *NotificationsCommentIdKey              = @"NotificationsComment
     NSDictionary *mediaRanges       = [textBlock buildRangesToImagesMap:mediaMap];
     
     // Load the attributedText
-    NSAttributedString *text        = textBlock.isBadge ? textBlock.attributedBadgeText : textBlock.attributedRichText;
+    NSAttributedString *text        = self.note.isBadge ? textBlock.attributedBadgeText : textBlock.attributedRichText;
     
     // Setup the Cell
     cell.attributedText             = [text stringByEmbeddingImageAttachments:mediaRanges];
-    cell.isBadge                    = textBlock.isBadge;
     
     // Setup the Callbacks
     __weak __typeof(self) weakSelf  = self;
     cell.onUrlClick                 = ^(NSURL *url){
         [weakSelf openURL:url];
     };
+}
+
+
+#pragma mark - Setup properties required by Cell Separator Logic
+
+- (void)setupSeparators:(NoteBlockTableViewCell *)cell indexPath:(NSIndexPath *)indexPath
+{
+    cell.isBadge                    = self.note.isBadge;
+    cell.isLastRow                  = (indexPath.row >= self.blockGroups.count - 1);
 }
 
 
@@ -762,8 +851,12 @@ static NSString *NotificationsCommentIdKey              = @"NotificationsComment
     NotificationRange *range    = [self.note notificationRangeWithUrl:url];
     BOOL success                = false;
     
-    if (range.isPost || range.isComment) {
+    if (range.isPost) {
         success = [self displayReaderWithPostId:range.postID siteID:range.siteID];
+    }
+    
+    if (range.isComment) {
+        success = [self displayCommentsWithPostId:range.postID siteID:range.siteID];
     }
     
     if (!success && range.isStats) {
@@ -771,7 +864,11 @@ static NSString *NotificationsCommentIdKey              = @"NotificationsComment
     }
     
     if (!success && range.isFollow) {
-        success = [self displayFollowersWithSiteID:self.note.metaSiteID];    
+        success = [self displayFollowersWithSiteID:self.note.metaSiteID];
+    }
+
+    if (!success && range.isUser) {
+        success = [self displayBrowseSite:range.siteID siteURL:range.url];
     }
     
     if (!success && url) {
@@ -791,8 +888,8 @@ static NSString *NotificationsCommentIdKey              = @"NotificationsComment
     BOOL success = false;
     
     if (!success && self.note.isFollow) {
-        success = [self displayFollowersWithSiteID:self.note.metaSiteID];
-        success = YES;
+        NSURL *resourceURL = [NSURL URLWithString:self.note.url];
+        success = [self displayBrowseSite:self.note.metaSiteID siteURL:resourceURL];
     }
     
     if (!success && self.note.metaCommentID) {
@@ -825,7 +922,7 @@ static NSString *NotificationsCommentIdKey              = @"NotificationsComment
             NotificationsPostIdKey      : postID
         };
         
-        [self performSegueWithIdentifier:NSStringFromClass([ReaderPostDetailViewController class]) sender:parameters];
+        [self performSegueWithIdentifier:[ReaderDetailViewController classNameWithoutNamespaces] sender:parameters];
     }
     return success;
 }
@@ -853,8 +950,8 @@ static NSString *NotificationsCommentIdKey              = @"NotificationsComment
     NSManagedObjectContext *context = [[ContextManager sharedInstance] mainContext];
     BlogService *service            = [[BlogService alloc] initWithManagedObjectContext:context];
     Blog *blog                      = [service blogByBlogId:siteID];
-    BOOL success                    = blog.isWPcom;
-    
+    BOOL success                    = [blog supports:BlogFeatureStats];
+
     if (success) {
         // TODO: Update StatsViewController to work with initWithCoder!
         StatsViewController *vc     = [[StatsViewController alloc] init];
@@ -875,21 +972,24 @@ static NSString *NotificationsCommentIdKey              = @"NotificationsComment
     BlogService *service            = [[BlogService alloc] initWithManagedObjectContext:context];
     Blog *blog                      = [service blogByBlogId:siteID];
 
-    if (!blog || !blog.isWPcom) {
+    if (!blog || !blog.isHostedAtWPcom) {
         return NO;
     }
 
     // Push the Stats ViewController
     NSString *identifier            = NSStringFromClass([StatsViewAllTableViewController class]);
     
-    UIStoryboard *statsStoryboard   = [UIStoryboard storyboardWithName:@"SiteStats" bundle:nil];
+    NSBundle *statsBundle = [NSBundle bundleForClass:[WPStatsViewController class]];
+    NSString *path = [statsBundle pathForResource:@"WordPressCom-Stats-iOS" ofType:@"bundle"];
+    NSBundle *bundle = [NSBundle bundleWithPath:path];
+    UIStoryboard *statsStoryboard   = [UIStoryboard storyboardWithName:@"SiteStats" bundle:bundle];
     StatsViewAllTableViewController *vc = [statsStoryboard instantiateViewControllerWithIdentifier:identifier];
     NSAssert(vc, @"Couldn't instantiate StatsViewAllTableViewController");
     
     vc.selectedDate                = [NSDate date];
     vc.statsSection                = StatsSectionFollowers;
     vc.statsSubSection             = StatsSubSectionFollowersDotCom;
-    vc.statsService                = [[WPStatsService alloc] initWithSiteId:blog.blogID
+    vc.statsService                = [[WPStatsService alloc] initWithSiteId:blog.dotComID
                                                                siteTimeZone:[service timeZoneForBlog:blog]
                                                                 oauth2Token:blog.authToken
                                                  andCacheExpirationInterval:NotificationFiveMinutes];
@@ -901,11 +1001,43 @@ static NSString *NotificationsCommentIdKey              = @"NotificationsComment
 
 - (BOOL)displayWebViewWithURL:(NSURL *)url
 {
-    BOOL success = url != nil;
-    if (success) {
-        [self performSegueWithIdentifier:NSStringFromClass([WPWebViewController class]) sender:url];
+    BOOL success = [url isKindOfClass:[NSURL class]];
+    if (!success) {
+        return NO;
     }
+    
+    WPWebViewController *webViewController  = [WPWebViewController authenticatedWebViewController:url];
+    UINavigationController *navController   = [[UINavigationController alloc] initWithRootViewController:webViewController];
+    
+    [self presentViewController:navController animated:YES completion:nil];
+    
     return success;
+}
+
+- (BOOL)displayBrowseSite:(NSNumber *)siteID siteURL:(NSURL *)siteURL
+{
+    if (![siteID isKindOfClass:[NSNumber class]]) {
+        return NO;
+    }
+
+    ReaderStreamViewController *browseViewController = [ReaderStreamViewController controllerWithSiteID:siteID isFeed:NO];
+    [self.navigationController pushViewController:browseViewController animated:YES];
+    
+    return YES;
+}
+
+- (BOOL)displayFullscreenImage:(UIImage *)image
+{
+    if (!image) {
+        return NO;
+    }
+    
+    WPImageViewController *imageViewController = [[WPImageViewController alloc] initWithImage:image];
+    imageViewController.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
+    imageViewController.modalPresentationStyle = UIModalPresentationFullScreen;
+    [self presentViewController:imageViewController animated:YES completion:nil];
+    
+    return YES;
 }
 
 
@@ -913,7 +1045,8 @@ static NSString *NotificationsCommentIdKey              = @"NotificationsComment
 
 - (void)followSiteWithBlock:(NotificationBlock *)block
 {
-    [WPAnalytics track:WPAnalyticsStatNotificationFollowAction];
+    
+    [WPAppAnalytics track:WPAnalyticsStatNotificationsSiteFollowAction withBlogID:block.metaSiteID];
     
     NSManagedObjectContext *context = [[ContextManager sharedInstance] mainContext];
     ReaderSiteService *service      = [[ReaderSiteService alloc] initWithManagedObjectContext:context];
@@ -929,7 +1062,7 @@ static NSString *NotificationsCommentIdKey              = @"NotificationsComment
 
 - (void)unfollowSiteWithBlock:(NotificationBlock *)block
 {
-    [WPAnalytics track:WPAnalyticsStatNotificationUnfollowAction];
+    [WPAppAnalytics track:WPAnalyticsStatNotificationsSiteUnfollowAction withBlogID:block.metaSiteID];
     
     NSManagedObjectContext *context = [[ContextManager sharedInstance] mainContext];
     ReaderSiteService *service      = [[ReaderSiteService alloc] initWithManagedObjectContext:context];
@@ -945,8 +1078,15 @@ static NSString *NotificationsCommentIdKey              = @"NotificationsComment
 
 - (void)likeCommentWithBlock:(NotificationBlock *)block
 {
-    [WPAnalytics track:WPAnalyticsStatNotificationLiked];
+
+    [WPAppAnalytics track:WPAnalyticsStatNotificationsCommentLiked withBlogID:block.metaSiteID];
     
+    // If the associated comment is *not* approved, let's attempt to auto-approve it, automatically
+    if (!block.isCommentApproved) {
+        [self approveCommentWithBlock:block];
+    }
+
+    // Proceed toggling the Like field
     NSManagedObjectContext *context = [[ContextManager sharedInstance] mainContext];
     CommentService *service         = [[CommentService alloc] initWithManagedObjectContext:context];
     __typeof(self) __weak weakSelf  = self;
@@ -961,7 +1101,7 @@ static NSString *NotificationsCommentIdKey              = @"NotificationsComment
 
 - (void)unlikeCommentWithBlock:(NotificationBlock *)block
 {
-    [WPAnalytics track:WPAnalyticsStatNotificationUnliked];
+    [WPAppAnalytics track:WPAnalyticsStatNotificationsCommentUnliked withBlogID:block.metaSiteID];
     
     NSManagedObjectContext *context = [[ContextManager sharedInstance] mainContext];
     CommentService *service         = [[CommentService alloc] initWithManagedObjectContext:context];
@@ -977,7 +1117,7 @@ static NSString *NotificationsCommentIdKey              = @"NotificationsComment
 
 - (void)approveCommentWithBlock:(NotificationBlock *)block
 {
-    [WPAnalytics track:WPAnalyticsStatNotificationApproved];
+    [WPAppAnalytics track:WPAnalyticsStatNotificationsCommentApproved withBlogID:block.metaSiteID];
     
     NSManagedObjectContext *context = [[ContextManager sharedInstance] mainContext];
     CommentService *service         = [[CommentService alloc] initWithManagedObjectContext:context];
@@ -989,15 +1129,13 @@ static NSString *NotificationsCommentIdKey              = @"NotificationsComment
     }];
 
     [block setActionOverrideValue:@(true) forKey:NoteActionApproveKey];
-    
-    // Hack: force NSFetchedResultsController to reload this notification
-    [self.note didChangeOverrides];
+    [self.tableView reloadData];
 }
 
 - (void)unapproveCommentWithBlock:(NotificationBlock *)block
 {
-    [WPAnalytics track:WPAnalyticsStatNotificationUnapproved];
-    
+    [WPAppAnalytics track:WPAnalyticsStatNotificationsCommentUnapproved withBlogID:block.metaSiteID];
+  
     NSManagedObjectContext *context = [[ContextManager sharedInstance] mainContext];
     CommentService *service         = [[CommentService alloc] initWithManagedObjectContext:context];
     __typeof(self) __weak weakSelf  = self;
@@ -1008,65 +1146,59 @@ static NSString *NotificationsCommentIdKey              = @"NotificationsComment
     }];
     
     [block setActionOverrideValue:@(false) forKey:NoteActionApproveKey];
-    
-    // Hack: force NSFetchedResultsController to reload this notification
-    [self.note didChangeOverrides];
+    [self.tableView reloadData];
 }
 
 - (void)spamCommentWithBlock:(NotificationBlock *)block
 {
-    UIAlertViewCompletionBlock completion = ^(UIAlertView *alertView, NSInteger buttonIndex) {
-        if (buttonIndex == alertView.cancelButtonIndex) {
-            return;
-        }
-        
-        [WPAnalytics track:WPAnalyticsStatNotificationFlaggedAsSpam];
+    NSParameterAssert(block);
+    NSParameterAssert(self.onDeletionRequestCallback);
+    
+    // Spam Action
+    NotificationDeletionActionBlock spamAction = ^(NotificationDeletionCompletionBlock onCompletion) {
+        NSParameterAssert(onCompletion);
         
         NSManagedObjectContext *context = [[ContextManager sharedInstance] mainContext];
         CommentService *service         = [[CommentService alloc] initWithManagedObjectContext:context];
         
-        [service spamCommentWithID:block.metaCommentID siteID:block.metaSiteID success:nil failure:nil];
+        [service spamCommentWithID:block.metaCommentID siteID:block.metaSiteID success:^{
+            onCompletion(YES);
+        } failure:^(NSError *error){
+            onCompletion(NO);
+        }];
         
-        [self.navigationController popToRootViewControllerAnimated:YES];
+        [WPAppAnalytics track:WPAnalyticsStatNotificationsCommentFlaggedAsSpam withBlogID:block.metaSiteID];
     };
     
-    NSString *message = NSLocalizedString(@"Are you sure you want to mark this comment as Spam?",
-                                          @"Message asking for confirmation before marking a comment as spam");
-    
-    [UIAlertView showWithTitle:NSLocalizedString(@"Confirm", @"Confirm")
-                       message:message
-             cancelButtonTitle:NSLocalizedString(@"Cancel", @"Cancel")
-             otherButtonTitles:@[NSLocalizedString(@"Spam", @"Spam")]
-                      tapBlock:completion];
+    // Hit the DeletionRequest Callback
+    self.onDeletionRequestCallback(spamAction);    
+    [self.navigationController popToRootViewControllerAnimated:YES];
 }
 
 - (void)trashCommentWithBlock:(NotificationBlock *)block
 {
-    // Callback Block
-    UIAlertViewCompletionBlock completion = ^(UIAlertView *alertView, NSInteger buttonIndex) {
-        if (buttonIndex == alertView.cancelButtonIndex) {
-            return;
-        }
-        
-        [WPAnalytics track:WPAnalyticsStatNotificationTrashed];
+    NSParameterAssert(block);
+    NSParameterAssert(self.onDeletionRequestCallback);
+    
+    // Trash Action
+    NotificationDeletionActionBlock deletionAction =  ^(NotificationDeletionCompletionBlock onCompletion) {
+        NSParameterAssert(onCompletion);
         
         NSManagedObjectContext *context = [[ContextManager sharedInstance] mainContext];
         CommentService *service         = [[CommentService alloc] initWithManagedObjectContext:context];
         
-        [service deleteCommentWithID:block.metaCommentID siteID:block.metaSiteID success:nil failure:nil];
+        [service deleteCommentWithID:block.metaCommentID siteID:block.metaSiteID success:^{
+            onCompletion(YES);
+        } failure:^(NSError *error) {
+            onCompletion(NO);
+        }];
         
-        [self.navigationController popToRootViewControllerAnimated:YES];
+        [WPAppAnalytics track:WPAnalyticsStatNotificationsCommentTrashed withBlogID:block.metaSiteID];
     };
- 
-    // Show the alertView
-    NSString *message = NSLocalizedString(@"Are you sure you want to delete this comment?",
-                                          @"Message asking for confirmation on comment deletion");
     
-    [UIAlertView showWithTitle:NSLocalizedString(@"Confirm", @"Confirm")
-                       message:message
-             cancelButtonTitle:NSLocalizedString(@"Cancel", @"Cancel")
-             otherButtonTitles:@[NSLocalizedString(@"Delete", @"Delete")]
-                      tapBlock:completion];
+    // Hit the DeletionRequest Callback
+    self.onDeletionRequestCallback(deletionAction);
+    [self.navigationController popToRootViewControllerAnimated:YES];
 }
 
 
@@ -1111,15 +1243,19 @@ static NSString *NotificationsCommentIdKey              = @"NotificationsComment
 
 - (void)handleReplyErrorWithBlock:(NotificationBlock *)block content:(NSString *)content
 {
-    [UIAlertView showWithTitle:nil
-                       message:NSLocalizedString(@"There has been an unexpected error while sending your reply", nil)
-             cancelButtonTitle:NSLocalizedString(@"Give Up", nil)
-             otherButtonTitles:@[ NSLocalizedString(@"Try Again", nil) ]
-                      tapBlock:^(UIAlertView *alertView, NSInteger buttonIndex) {
-                          if (buttonIndex != alertView.cancelButtonIndex) {
-                              [self sendReplyWithBlock:block content:content];
-                          }
-                      }];
+    NSString *message = NSLocalizedString(@"There has been an unexpected error while sending your reply", nil);
+    
+    UIAlertController *alertController = [UIAlertController alertControllerWithTitle:nil
+                                                                             message:message
+                                                                      preferredStyle:UIAlertControllerStyleAlert];
+    
+    [alertController addCancelActionWithTitle:NSLocalizedString(@"Cancel", nil) handler:nil];
+    [alertController addDefaultActionWithTitle:NSLocalizedString(@"Try Again", nil) handler:^(UIAlertAction *action) {
+        [self sendReplyWithBlock:block content:content];
+    }];
+    
+    // Note: This viewController might not be visible anymore
+    [alertController presentFromRootViewController];
 }
 
 
@@ -1164,18 +1300,23 @@ static NSString *NotificationsCommentIdKey              = @"NotificationsComment
 
 - (void)handleCommentUpdateErrorWithBlock:(NotificationBlock *)block content:(NSString *)content
 {
-    [UIAlertView showWithTitle:nil
-                       message:NSLocalizedString(@"There has been an unexpected error while updating your comment", nil)
-             cancelButtonTitle:NSLocalizedString(@"Give Up", nil)
-             otherButtonTitles:@[ NSLocalizedString(@"Try Again", nil) ]
-                      tapBlock:^(UIAlertView *alertView, NSInteger buttonIndex) {
-                          if (buttonIndex == alertView.cancelButtonIndex) {
-                              block.textOverride = nil;
-                              [self reloadData];
-                          } else {
-                              [self updateCommentWithBlock:block content:content];
-                          }
-                      }];
+    NSString *message = NSLocalizedString(@"There has been an unexpected error while updating your comment", nil);
+    
+    UIAlertController *alertController = [UIAlertController alertControllerWithTitle:nil
+                                                                             message:message
+                                                                      preferredStyle:UIAlertControllerStyleAlert];
+    
+    [alertController addCancelActionWithTitle:NSLocalizedString(@"Give Up", nil) handler:^(UIAlertAction *action) {
+        block.textOverride = nil;
+        [self reloadData];
+    }];
+    
+    [alertController addDefaultActionWithTitle:NSLocalizedString(@"Try Again", nil) handler:^(UIAlertAction *action) {
+        [self updateCommentWithBlock:block content:content];
+    }];
+    
+    // Note: This viewController might not be visible anymore
+    [alertController presentFromRootViewController];
 }
 
 
@@ -1183,13 +1324,7 @@ static NSString *NotificationsCommentIdKey              = @"NotificationsComment
 
 - (void)prepareForSegue:(UIStoryboardSegue *)segue sender:(id)sender
 {
-    if ([segue.identifier isEqualToString:NSStringFromClass([WPWebViewController class])]) {
-        NSParameterAssert([sender isKindOfClass:[NSURL class]]);
-        
-        WPWebViewController *webViewController          = segue.destinationViewController;
-        webViewController.url                           = (NSURL *)sender;
-        
-    } else if([segue.identifier isEqualToString:NSStringFromClass([StatsViewController class])]) {
+    if ([segue.identifier isEqualToString:NSStringFromClass([StatsViewController class])]) {
         NSParameterAssert([sender isKindOfClass:[Blog class]]);
         
         StatsViewController *statsViewController        = segue.destinationViewController;
@@ -1206,14 +1341,14 @@ static NSString *NotificationsCommentIdKey              = @"NotificationsComment
         [commentsViewController setAllowsPushingPostDetails:YES];
         [commentsViewController setupWithPostID:postID siteID:siteID];        
         
-    } else if([segue.identifier isEqualToString:NSStringFromClass([ReaderPostDetailViewController class])]) {
+    } else if([segue.identifier isEqualToString:[ReaderDetailViewController classNameWithoutNamespaces]]) {
         NSParameterAssert([sender isKindOfClass:[NSDictionary class]]);
         
         NSDictionary *parameters                        = (NSDictionary *)sender;
         NSNumber *siteID                                = parameters[NotificationsSiteIdKey];
         NSNumber *postID                                = parameters[NotificationsPostIdKey];
         
-        ReaderPostDetailViewController *readerViewController = segue.destinationViewController;
+        ReaderDetailViewController *readerViewController = segue.destinationViewController;
         [readerViewController setupWithPostID:postID siteID:siteID];
     }
 }
@@ -1223,12 +1358,18 @@ static NSString *NotificationsCommentIdKey              = @"NotificationsComment
 
 - (void)handleNotificationChange:(NSNotification *)notification
 {
-    NSSet *updated = notification.userInfo[NSUpdatedObjectsKey];
-    NSSet *refreshed = notification.userInfo[NSRefreshedObjectsKey];
+    NSSet *updated      = notification.userInfo[NSUpdatedObjectsKey];
+    NSSet *refreshed    = notification.userInfo[NSRefreshedObjectsKey];
+    NSSet *deleted      = notification.userInfo[NSDeletedObjectsKey];
     
     // Reload the table, if *our* notification got updated
     if ([updated containsObject:self.note] || [refreshed containsObject:self.note]) {
         [self reloadData];
+    }
+    
+    // Dismiss this ViewController if *our* notification... just got deleted
+    if ([deleted containsObject:self.note]) {
+        [self.navigationController popToRootViewControllerAnimated:YES];
     }
 }
 

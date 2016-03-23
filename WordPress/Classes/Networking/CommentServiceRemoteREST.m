@@ -1,43 +1,43 @@
 #import "CommentServiceRemoteREST.h"
 #import "WordPressComApi.h"
-#import "Blog.h"
 #import "RemoteComment.h"
 #import "NSDate+WordPressJSON.h"
-#import <NSObject+SafeExpectations.h>
+#import <NSObject_SafeExpectations/NSObject+SafeExpectations.h>
 
-@interface CommentServiceRemoteREST ()
 
-@property (nonatomic, strong) WordPressComApi *api;
-
-@end
 
 @implementation CommentServiceRemoteREST
 
-- (id)initWithApi:(WordPressComApi *)api
-{
-    self = [super init];
-    if (self) {
-        _api = api;
-    }
-    return self;
-}
-
-
-
 #pragma mark Public methods
 
-#pragma mark Blog-centric methods
+#pragma mark - Blog-centric methods
 
-- (void)getCommentsForBlog:(Blog *)blog
-                   success:(void (^)(NSArray *))success
-                   failure:(void (^)(NSError *))failure
+- (void)getCommentsWithMaximumCount:(NSInteger)maximumComments
+                            success:(void (^)(NSArray *comments))success
+                            failure:(void (^)(NSError *error))failure
 {
-    NSString *path = [NSString stringWithFormat:@"sites/%@/comments", blog.dotComID];
-    NSDictionary *parameters = @{
+    [self getCommentsWithMaximumCount:maximumComments options:nil success:success failure:failure];
+}
+
+- (void)getCommentsWithMaximumCount:(NSInteger)maximumComments
+                            options:(NSDictionary *)options
+                            success:(void (^)(NSArray *posts))success
+                            failure:(void (^)(NSError *error))failure
+{
+    NSString *path = [NSString stringWithFormat:@"sites/%@/comments", self.siteID];
+    NSString *requestUrl = [self pathForEndpoint:path
+                                     withVersion:ServiceRemoteRESTApiVersion_1_1];
+    
+    NSMutableDictionary *parameters = [NSMutableDictionary dictionaryWithDictionary:@{
                                  @"status": @"all",
                                  @"context": @"edit",
-                                 };
-    [self.api GET:path
+                                 @"number": @(maximumComments)
+                                 }];
+    if (options) {
+        [parameters addEntriesFromDictionary:options];
+    }
+    
+    [self.api GET:requestUrl
        parameters:parameters
           success:^(AFHTTPRequestOperation *operation, id responseObject) {
               if (success) {
@@ -48,24 +48,30 @@
                   failure(error);
               }
           }];
+
 }
 
+
+
 - (void)createComment:(RemoteComment *)comment
-              forBlog:(Blog *)blog
               success:(void (^)(RemoteComment *comment))success
               failure:(void (^)(NSError *))failure
 {
     NSString *path;
     if (comment.parentID) {
-        path = [NSString stringWithFormat:@"sites/%@/comments/%@/replies/new", blog.dotComID, comment.parentID];
+        path = [NSString stringWithFormat:@"sites/%@/comments/%@/replies/new", self.siteID, comment.parentID];
     } else {
-        path = [NSString stringWithFormat:@"sites/%@/posts/%@/replies/new", blog.dotComID, comment.postID];
+        path = [NSString stringWithFormat:@"sites/%@/posts/%@/replies/new", self.siteID, comment.postID];
     }
+    
+    NSString *requestUrl = [self pathForEndpoint:path
+                                     withVersion:ServiceRemoteRESTApiVersion_1_1];
+    
     NSDictionary *parameters = @{
                                  @"content": comment.content,
                                  @"context": @"edit",
                                  };
-    [self.api POST:path
+    [self.api POST:requestUrl
         parameters:parameters
            success:^(AFHTTPRequestOperation *operation, id responseObject) {
                // TODO: validate response
@@ -81,16 +87,18 @@
 }
 
 - (void)updateComment:(RemoteComment *)comment
-              forBlog:(Blog *)blog
               success:(void (^)(RemoteComment *comment))success
               failure:(void (^)(NSError *))failure
 {
-    NSString *path = [NSString stringWithFormat:@"sites/%@/comments/%@", blog.dotComID, comment.commentID];
+    NSString *path = [NSString stringWithFormat:@"sites/%@/comments/%@", self.siteID, comment.commentID];
+    NSString *requestUrl = [self pathForEndpoint:path
+                                     withVersion:ServiceRemoteRESTApiVersion_1_1];
+    
     NSDictionary *parameters = @{
                                  @"content": comment.content,
                                  @"context": @"edit",
                                  };
-    [self.api POST:path
+    [self.api POST:requestUrl
         parameters:parameters
            success:^(AFHTTPRequestOperation *operation, id responseObject) {
                // TODO: validate response
@@ -106,16 +114,18 @@
 }
 
 - (void)moderateComment:(RemoteComment *)comment
-                forBlog:(Blog *)blog
                 success:(void (^)(RemoteComment *))success
                 failure:(void (^)(NSError *))failure
 {
-    NSString *path = [NSString stringWithFormat:@"sites/%@/comments/%@", blog.dotComID, comment.commentID];
+    NSString *path = [NSString stringWithFormat:@"sites/%@/comments/%@", self.siteID, comment.commentID];
+    NSString *requestUrl = [self pathForEndpoint:path
+                                     withVersion:ServiceRemoteRESTApiVersion_1_1];
+    
     NSDictionary *parameters = @{
                                  @"status": [self remoteStatusWithStatus:comment.status],
                                  @"context": @"edit",
                                  };
-    [self.api POST:path
+    [self.api POST:requestUrl
         parameters:parameters
            success:^(AFHTTPRequestOperation *operation, id responseObject) {
                // TODO: validate response
@@ -131,12 +141,14 @@
 }
 
 - (void)trashComment:(RemoteComment *)comment
-             forBlog:(Blog *)blog
              success:(void (^)())success
              failure:(void (^)(NSError *error))failure
 {
-    NSString *path = [NSString stringWithFormat:@"sites/%@/comments/%@/delete", blog.dotComID, comment.commentID];
-    [self.api POST:path
+    NSString *path = [NSString stringWithFormat:@"sites/%@/comments/%@/delete", self.siteID, comment.commentID];
+    NSString *requestUrl = [self pathForEndpoint:path
+                                     withVersion:ServiceRemoteRESTApiVersion_1_1];
+    
+    [self.api POST:requestUrl
         parameters:nil
            success:^(AFHTTPRequestOperation *operation, id responseObject) {
                if (success) {
@@ -153,15 +165,16 @@
 #pragma mark Post-centric methods
 
 - (void)syncHierarchicalCommentsForPost:(NSNumber *)postID
-                               fromSite:(NSNumber *)siteID
                                    page:(NSUInteger)page
                                  number:(NSUInteger)number
                                 success:(void (^)(NSArray *comments))success
                                 failure:(void (^)(NSError *error))failure
 {
-    NSString *path = [NSString stringWithFormat:@"sites/%@/posts/%@/replies?order=ASC&hierarchical=1&page=%d&number=%d", siteID, postID, page, number];
+    NSString *path = [NSString stringWithFormat:@"sites/%@/posts/%@/replies?order=ASC&hierarchical=1&page=%d&number=%d", self.siteID, postID, page, number];
+    NSString *requestUrl = [self pathForEndpoint:path
+                                     withVersion:ServiceRemoteRESTApiVersion_1_1];
 
-    [self.api GET:path parameters:nil success:^(AFHTTPRequestOperation *operation, id responseObject) {
+    [self.api GET:requestUrl parameters:nil success:^(AFHTTPRequestOperation *operation, id responseObject) {
         if (success) {
             NSDictionary *dict = (NSDictionary *)responseObject;
             NSArray *comments = [self remoteCommentsFromJSONArray:[dict arrayForKey:@"comments"]];
@@ -178,17 +191,19 @@
 #pragma mark - Public Methods
 
 - (void)updateCommentWithID:(NSNumber *)commentID
-                     siteID:(NSNumber *)siteID
                     content:(NSString *)content
                     success:(void (^)())success
                     failure:(void (^)(NSError *error))failure
 {
-    NSString *path = [NSString stringWithFormat:@"sites/%@/comments/%@", siteID, commentID];
+    NSString *path = [NSString stringWithFormat:@"sites/%@/comments/%@", self.siteID, commentID];
+    NSString *requestUrl = [self pathForEndpoint:path
+                                     withVersion:ServiceRemoteRESTApiVersion_1_1];
+    
     NSDictionary *parameters = @{
         @"content": content,
         @"context": @"edit",
     };
-    [self.api POST:path
+    [self.api POST:requestUrl
         parameters:parameters
            success:^(AFHTTPRequestOperation *operation, id responseObject) {
                if (success) {
@@ -202,14 +217,17 @@
 }
 
 - (void)replyToPostWithID:(NSNumber *)postID
-                   siteID:(NSNumber *)siteID
                   content:(NSString *)content
                   success:(void (^)(RemoteComment *comment))success
                   failure:(void (^)(NSError *error))failure
 {
-    NSString *path = [NSString stringWithFormat:@"sites/%@/posts/%@/replies/new", siteID, postID];
+    NSString *path = [NSString stringWithFormat:@"sites/%@/posts/%@/replies/new", self.siteID, postID];
+    NSString *requestUrl = [self pathForEndpoint:path
+                                     withVersion:ServiceRemoteRESTApiVersion_1_1];
+    
     NSDictionary *parameters = @{@"content": content};
-    [self.api POST:path
+    
+    [self.api POST:requestUrl
         parameters:parameters
            success:^(AFHTTPRequestOperation *operation, id responseObject) {
                if (success) {
@@ -225,17 +243,19 @@
 }
 
 - (void)replyToCommentWithID:(NSNumber *)commentID
-                      siteID:(NSNumber *)siteID
                      content:(NSString *)content
                      success:(void (^)(RemoteComment *comment))success
                      failure:(void (^)(NSError *error))failure
 {
-    NSString *path = [NSString stringWithFormat:@"sites/%@/comments/%@/replies/new", siteID, commentID];
+    NSString *path = [NSString stringWithFormat:@"sites/%@/comments/%@/replies/new", self.siteID, commentID];
+    NSString *requestUrl = [self pathForEndpoint:path
+                                     withVersion:ServiceRemoteRESTApiVersion_1_1];
+    
     NSDictionary *parameters = @{
         @"content": content,
         @"context": @"edit",
     };
-    [self.api POST:path
+    [self.api POST:requestUrl
         parameters:parameters
            success:^(AFHTTPRequestOperation *operation, id responseObject) {
                if (success) {
@@ -251,18 +271,20 @@
 }
 
 - (void)moderateCommentWithID:(NSNumber *)commentID
-                       siteID:(NSNumber *)siteID
                        status:(NSString *)status
                       success:(void (^)())success
                       failure:(void (^)(NSError *error))failure
 {
-    NSString *path = [NSString stringWithFormat:@"sites/%@/comments/%@", siteID, commentID];
+    NSString *path = [NSString stringWithFormat:@"sites/%@/comments/%@", self.siteID, commentID];
+    NSString *requestUrl = [self pathForEndpoint:path
+                                     withVersion:ServiceRemoteRESTApiVersion_1_1];
+    
     NSDictionary *parameters = @{
         @"status"   : status,
         @"context"  : @"edit",
     };
     
-    [self.api POST:path
+    [self.api POST:requestUrl
         parameters:parameters
            success:^(AFHTTPRequestOperation *operation, id responseObject) {
                if (success) {
@@ -276,12 +298,14 @@
 }
 
 - (void)trashCommentWithID:(NSNumber *)commentID
-                    siteID:(NSNumber *)siteID
                    success:(void (^)())success
                    failure:(void (^)(NSError *error))failure
 {
-    NSString *path = [NSString stringWithFormat:@"sites/%@/comments/%@/delete", siteID, commentID];
-    [self.api POST:path
+    NSString *path = [NSString stringWithFormat:@"sites/%@/comments/%@/delete", self.siteID, commentID];
+    NSString *requestUrl = [self pathForEndpoint:path
+                                     withVersion:ServiceRemoteRESTApiVersion_1_1];
+    
+    [self.api POST:requestUrl
         parameters:nil
            success:^(AFHTTPRequestOperation *operation, id responseObject) {
                if (success) {
@@ -295,13 +319,14 @@
 }
 
 - (void)likeCommentWithID:(NSNumber *)commentID
-                   siteID:(NSNumber *)siteID
                   success:(void (^)())success
                   failure:(void (^)(NSError *error))failure
 {
-    NSString *path = [NSString stringWithFormat:@"sites/%@/comments/%@/likes/new", siteID, commentID];
+    NSString *path = [NSString stringWithFormat:@"sites/%@/comments/%@/likes/new", self.siteID, commentID];
+    NSString *requestUrl = [self pathForEndpoint:path
+                                     withVersion:ServiceRemoteRESTApiVersion_1_1];
     
-    [self.api POST:path
+    [self.api POST:requestUrl
         parameters:nil
            success:^(AFHTTPRequestOperation *operation, id responseObject) {
                if (success) {
@@ -315,13 +340,14 @@
 }
 
 - (void)unlikeCommentWithID:(NSNumber *)commentID
-                     siteID:(NSNumber *)siteID
                     success:(void (^)())success
                     failure:(void (^)(NSError *error))failure
 {
-    NSString *path = [NSString stringWithFormat:@"sites/%@/comments/%@/likes/mine/delete", siteID, commentID];
+    NSString *path = [NSString stringWithFormat:@"sites/%@/comments/%@/likes/mine/delete", self.siteID, commentID];
+    NSString *requestUrl = [self pathForEndpoint:path
+                                     withVersion:ServiceRemoteRESTApiVersion_1_1];
     
-    [self.api POST:path
+    [self.api POST:requestUrl
         parameters:nil
            success:^(AFHTTPRequestOperation *operation, id responseObject) {
                if (success) {
@@ -339,11 +365,9 @@
 
 - (NSArray *)remoteCommentsFromJSONArray:(NSArray *)jsonComments
 {
-    NSMutableArray *comments = [NSMutableArray arrayWithCapacity:jsonComments.count];
-    for (NSDictionary *jsonComment in jsonComments) {
-        [comments addObject:[self remoteCommentFromJSONDictionary:jsonComment]];
-    }
-    return [NSArray arrayWithArray:comments];
+    return [jsonComments wp_map:^id(NSDictionary *jsonComment) {
+        return [self remoteCommentFromJSONDictionary:jsonComment];
+    }];
 }
 
 - (RemoteComment *)remoteCommentFromJSONDictionary:(NSDictionary *)jsonDictionary

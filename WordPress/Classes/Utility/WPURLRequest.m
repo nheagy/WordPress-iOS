@@ -21,6 +21,24 @@
     NSParameterAssert(username);
     NSParameterAssert(password != nil || bearerToken != nil);
     
+    NSString *hostname          = loginUrl.host;
+    NSString *unsecuredProtocol = @"http";
+    NSString *securedProtocol   = @"https";
+    
+    // Let's make sure we don't send OAuth2 tokens outside of wordpress.com
+    if (![hostname isEqualToString:@"wordpress.com"] && ![hostname hasSuffix:@".wordpress.com"]) {
+        bearerToken = nil;
+        
+    // Enforce HTTPS for WordPress.com Sites
+    } else if ([loginUrl.scheme isEqual:unsecuredProtocol]) {
+        NSRange range = NSMakeRange(0, unsecuredProtocol.length);
+        NSString *secureURL = [loginUrl.absoluteString stringByReplacingOccurrencesOfString:unsecuredProtocol
+                                                                                 withString:securedProtocol
+                                                                                    options:NSDiacriticInsensitiveSearch
+                                                                                      range:range];
+        loginUrl = [NSURL URLWithString:secureURL];
+    }
+    
     NSMutableURLRequest *request = [self mutableRequestWithURL:loginUrl userAgent:userAgent];
     
     // If we've got a token, let's make sure the password never gets sent
@@ -29,12 +47,18 @@
     
     // Method!
     [request setHTTPMethod:@"POST"];
-    
+
+    // redirect URL
+    // `stringByUrlEncoding` uses `URLQueryAllowedCharacterSet` and thus does not
+    // encode ampersands. Manually encode any ampersands that might be in the
+    // redirect string's own query string.
+    NSString *redirectTo = [[redirectURL.absoluteString stringByUrlEncoding] stringByReplacingOccurrencesOfString:@"&" withString:@"%26"];
+
     // Auth Body
     NSString *requestBody = [NSString stringWithFormat:@"%@=%@&%@=%@&%@=%@",
                              @"log", [username stringByUrlEncoding],
                              @"pwd", encodedPassword,
-                             @"redirect_to", [redirectURL.absoluteString stringByUrlEncoding]];
+                             @"redirect_to", redirectTo];
     
     request.HTTPBody = [requestBody dataUsingEncoding:NSUTF8StringEncoding];
     
@@ -57,8 +81,7 @@
     NSParameterAssert(url);
     
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
-    request.cachePolicy = NSURLRequestReturnCacheDataElseLoad;
-    
+
     if (userAgent) {
         [request setValue:userAgent forHTTPHeaderField:@"User-Agent"];
     }

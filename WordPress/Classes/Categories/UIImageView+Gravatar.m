@@ -1,15 +1,12 @@
 #import "UIImageView+Gravatar.h"
 #import "UIImageView+AFNetworking.h"
 #import "NSString+Helpers.h"
+#import "Constants.h"
 
-NSInteger const BlavatarDefaultSize = 43;
+NSInteger const BlavatarDefaultSize = 40;
 NSInteger const GravatarDefaultSize = 80;
 
-NSString *const BlavatarBaseUrl = @"http://gravatar.com/blavatar";
-NSString *const GravatarBaseUrl = @"http://gravatar.com/avatar";
-
-NSString *const BlavatarDefaultWporg = @"blavatar-wporg.png";
-NSString *const BlavatarDefaultWpcom = @"blavatar-wpcom.png";
+NSString *const BlavatarDefault = @"blavatar-default";
 NSString *const GravatarDefault = @"gravatar.png";
 
 // More information on gravatar ratings: https://en.gravatar.com/site/implement/images/
@@ -51,39 +48,21 @@ NSString *const GravatarRatingX = @"x";
     }];
 }
 
-- (void)setImageWithBlavatarUrl:(NSString *)blavatarUrl
+- (void)setImageWithSiteIcon:(NSString *)siteIcon
 {
-    BOOL wpcom = ([blavatarUrl rangeOfString:@".wordpress.com"].location != NSNotFound);
-    [self setImageWithBlavatarUrl:blavatarUrl isWPcom:wpcom];
+    UIImage *blavatarDefaultImage = [UIImage imageNamed:BlavatarDefault];
+
+    [self setImageWithSiteIcon:siteIcon placeholderImage:blavatarDefaultImage];
 }
 
-- (void)setImageWithBlavatarUrl:(NSString *)blavatarUrl isWPcom:(BOOL)wpcom
+- (void)setImageWithSiteIcon:(NSString *)siteIcon placeholderImage:(UIImage *)placeholderImage
 {
-    static UIImage *blavatarDefaultImageWPcom;
-    static UIImage *blavatarDefaultImageWPorg;
-    if (blavatarDefaultImageWPcom == nil) {
-        blavatarDefaultImageWPcom = [UIImage imageNamed:BlavatarDefaultWpcom];
-    }
-    if (blavatarDefaultImageWPorg == nil) {
-        blavatarDefaultImageWPorg = [UIImage imageNamed:BlavatarDefaultWporg];
-    }
-
-    UIImage *placeholderImage;
-    if (wpcom) {
-        placeholderImage = blavatarDefaultImageWPcom;
+    if ([self isPhotonURL:siteIcon]) {
+        [self setImageWithURL:[self siteIconURLForSiteIconUrl:siteIcon] placeholderImage:placeholderImage];
+    } else if ([self isBlavatarURL:siteIcon]) {
+        [self setImageWithURL:[self blavatarURLForBlavatarURL:siteIcon] placeholderImage:placeholderImage];
     } else {
-        placeholderImage = blavatarDefaultImageWPorg;
-    }
-
-    [self setImageWithBlavatarUrl:blavatarUrl placeholderImage:placeholderImage];
-}
-
-- (void)setImageWithBlavatarUrl:(NSString *)blavatarUrl placeholderImage:(UIImage *)placeholderImage
-{
-    if ([blavatarUrl rangeOfString:@"gravatar.com/blavatar"].location == NSNotFound) {
-        [self setImageWithURL:[self blavatarURLForHost:blavatarUrl] placeholderImage:placeholderImage];
-    } else {
-        [self setImageWithURL:[self blavatarURLForBlavatarURL:blavatarUrl] placeholderImage:placeholderImage];
+        [self setImageWithURL:[self blavatarURLForHost:siteIcon] placeholderImage:placeholderImage];
     }
 }
 
@@ -98,8 +77,16 @@ NSString *const GravatarRatingX = @"x";
     if (!rating) {
         rating = GravatarRatingG;
     }
-    NSString *gravatarUrl = [NSString stringWithFormat:@"%@/%@?d=404&s=%d&r=%@", GravatarBaseUrl, [email md5], size, rating];
+    NSString *gravatarUrl = [NSString stringWithFormat:@"%@/%@?d=404&s=%d&r=%@", WPGravatarBaseURL, [email md5], size, rating];
     return [NSURL URLWithString:gravatarUrl];
+}
+
+- (NSURL *)siteIconURLForSiteIconUrl:(NSString *)path
+{
+    NSInteger size = [self sizeForBlavatarDownload];
+    NSURLComponents *urlComponents = [[NSURLComponents alloc] initWithString:path];
+    urlComponents.query = [NSString stringWithFormat:@"w=%d&h=%d", size, size];
+    return urlComponents.URL;
 }
 
 - (NSURL *)blavatarURLForHost:(NSString *)host
@@ -109,15 +96,16 @@ NSString *const GravatarRatingX = @"x";
 
 - (NSURL *)blavatarURLForHost:(NSString *)host withSize:(NSInteger)size
 {
-    NSString *blavatarUrl = [NSString stringWithFormat:@"%@/%@?d=404&s=%d", BlavatarBaseUrl, [host md5], size];
+    NSString *blavatarUrl = [NSString stringWithFormat:@"%@/%@?d=404&s=%d", WPBlavatarBaseURL, [host md5], size];
     return [NSURL URLWithString:blavatarUrl];
 }
 
 - (NSURL *)blavatarURLForBlavatarURL:(NSString *)path
 {
-    CGFloat size = [self sizeForBlavatarDownload];
-    NSString *blavatarURL = [NSString stringWithFormat:@"%@?d=404&s=%d", path, size];
-    return [NSURL URLWithString:blavatarURL];
+    NSInteger size = [self sizeForBlavatarDownload];
+    NSURLComponents *urlComponents = [[NSURLComponents alloc] initWithString:path];
+    urlComponents.query = [NSString stringWithFormat:@"d=404&s=%d", size];
+    return urlComponents.URL;
 }
 
 - (NSInteger)sizeForGravatarDownload
@@ -142,6 +130,17 @@ NSString *const GravatarRatingX = @"x";
     size *= [[UIScreen mainScreen] scale];
 
     return size;
+}
+
+// Possible matches are "i0.wp.com", "i1.wp.com" & "i2.wp.com" -> https://developer.wordpress.com/docs/photon/
+- (BOOL)isPhotonURL:(NSString *)path
+{
+    return [path rangeOfString:@".wp.com"].location != NSNotFound;
+}
+
+- (BOOL)isBlavatarURL:(NSString *)path
+{
+    return [path rangeOfString:@"gravatar.com/blavatar"].location != NSNotFound;
 }
 
 @end

@@ -6,70 +6,94 @@
 #import "ContextManager.h"
 #import "Blog.h"
 #import "WPAccount.h"
-#import "WPTableViewSectionHeaderView.h"
 #import "AccountService.h"
+#import "WordPress-Swift.h"
 
 static NSString *const BlogCellIdentifier = @"BlogCell";
+static CGFloat BlogCellRowHeight = 54.0;
 
-@interface BlogSelectorViewController ()
+@interface BlogSelectorViewController () <NSFetchedResultsControllerDelegate>
 
-@property (nonatomic, strong) NSFetchedResultsController *resultsController;
-@property (nonatomic) BOOL sectionDeletedByController;
-
-@property (nonatomic, strong) NSManagedObjectID *selectedObjectID;
-@property (nonatomic, copy) void (^selectedCompletionHandler)(NSManagedObjectID *selectedObjectID);
-@property (nonatomic, copy) void (^cancelCompletionHandler)(void);
+@property (nonatomic, strong) NSFetchedResultsController    *resultsController;
+@property (nonatomic, strong) NSNumber                      *selectedObjectDotcomID;
+@property (nonatomic, strong) NSManagedObjectID             *selectedObjectID;
+@property (nonatomic,   copy) BlogSelectorSuccessHandler    successHandler;
+@property (nonatomic,   copy) BlogSelectorDismissHandler    dismissHandler;
 
 @end
 
 @implementation BlogSelectorViewController
-
-- (id)initWithSelectedBlogObjectID:(NSManagedObjectID *)objectID
-                selectedCompletion:(void (^)(NSManagedObjectID *))selected
-                  cancelCompletion:(void (^)())cancel
-{
-    self = [super initWithStyle:UITableViewStyleGrouped];
-
-    if (self) {
-        _selectedObjectID = objectID;
-        _selectedCompletionHandler = selected;
-        _cancelCompletionHandler = cancel;
-    }
-
-    return self;
-}
 
 - (void)dealloc
 {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
+- (instancetype)initWithSelectedBlogObjectID:(NSManagedObjectID *)objectID
+                              successHandler:(BlogSelectorSuccessHandler)successHandler
+                              dismissHandler:(BlogSelectorDismissHandler)dismissHandler
+{
+    self = [super initWithStyle:UITableViewStyleGrouped];
+
+    if (self) {
+        _selectedObjectID = objectID;
+        _successHandler = successHandler;
+        _dismissHandler = dismissHandler;
+        _displaysCancelButton = YES;
+    }
+
+    return self;
+}
+
+- (instancetype)initWithSelectedBlogDotComID:(NSNumber *)dotComID
+                              successHandler:(BlogSelectorSuccessDotComHandler)successHandler
+                              dismissHandler:(BlogSelectorDismissHandler)dismissHandler
+{
+    // Keep the Selected Dotcom ID
+    _selectedObjectDotcomID = dotComID;
+    
+    // Wrap up the main callback into something useful to us
+    BlogSelectorSuccessHandler wrappedSuccessHandler = ^(NSManagedObjectID *selectedObjectID) {
+        NSManagedObjectContext *context = [[ContextManager sharedInstance] mainContext];
+        Blog *blog = [context existingObjectWithID:selectedObjectID error:nil];
+        successHandler(blog.dotComID);
+    };
+    
+    return [self initWithSelectedBlogObjectID:nil
+                               successHandler:wrappedSuccessHandler
+                               dismissHandler:dismissHandler];
+}
+
 - (void)viewDidLoad
 {
     [super viewDidLoad];
 
+    // Listen to Account Changes
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(wordPressComAccountChanged:)
                                                  name:WPAccountDefaultWordPressComAccountChangedNotification
                                                object:nil];
 
-    if (IS_IPHONE) {
-        // Remove one-pixel gap resulting from a top-aligned grouped table view
-        UIEdgeInsets tableInset = [self.tableView contentInset];
-        tableInset.top = -1;
-        self.tableView.contentInset = tableInset;
-
-        // Cancel button
+    // Cancel button
+    if ([UIDevice isPhone] && self.displaysCancelButton) {
         UIBarButtonItem *cancelButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemCancel
                                                                                           target:self
                                                                                           action:@selector(cancelButtonTapped:)];
 
         self.navigationItem.leftBarButtonItem = cancelButtonItem;
     }
-
+    
+    // NSFetchedResultsController
+    self.resultsController.delegate = self;
+    [self.resultsController performFetch:nil];
+    
+    // TableView
     [WPStyleGuide configureColorsForView:self.view andTableView:self.tableView];
-
+    
+    self.tableView.cellLayoutMarginsFollowReadableWidth = NO;
     [self.tableView registerClass:[WPBlogTableViewCell class] forCellReuseIdentifier:BlogCellIdentifier];
+    [self.tableView reloadData];
+
 }
 
 - (void)viewWillAppear:(BOOL)animated
@@ -77,14 +101,9 @@ static NSString *const BlogCellIdentifier = @"BlogCell";
     [super viewWillAppear:animated];
 
     [self.navigationController setNavigationBarHidden:NO animated:animated];
-    self.resultsController.delegate = self;
-    [self.resultsController performFetch:nil];
-    [self.tableView reloadData];
-
-    // Scroll the currently selected object into view.
-    NSManagedObject *obj = [self.resultsController.managedObjectContext objectWithID:self.selectedObjectID];
-    NSIndexPath *indexPath = [self.resultsController indexPathForObject:obj];
-    [self.tableView scrollToRowAtIndexPath:indexPath atScrollPosition:UITableViewScrollPositionNone animated:NO];
+    
+    [self syncBlogs];
+    [self scrollToSelectedObjectID];
 }
 
 - (void)viewWillDisappear:(BOOL)animated
@@ -93,15 +112,54 @@ static NSString *const BlogCellIdentifier = @"BlogCell";
     self.resultsController.delegate = nil;
 }
 
-- (NSUInteger)numSites
+
+#pragma mark - Helpers
+
+- (void)syncBlogs
 {
-    return [[self.resultsController fetchedObjects] count];
+    NSManagedObjectContext *context = [[ContextManager sharedInstance] newDerivedContext];
+    
+    [context performBlock:^{
+        AccountService *accountService = [[AccountService alloc] initWithManagedObjectContext:context];
+        BlogService *blogService = [[BlogService alloc] initWithManagedObjectContext:context];
+        WPAccount *defaultAccount = [accountService defaultWordPressComAccount];
+        
+        if (!defaultAccount) {
+            return;
+        }
+        
+        [blogService syncBlogsForAccount:defaultAccount success:nil failure:nil];
+    }];
 }
 
-- (BOOL)hasDotComAndSelfHosted
+- (void)scrollToSelectedObjectID
 {
-    return ([[self.resultsController sections] count] > 1);
+    if (self.selectedObjectID == nil) {
+        return;
+    }
+    
+    NSManagedObject *obj = [self.resultsController.managedObjectContext objectWithID:self.selectedObjectID];
+    NSIndexPath *indexPath = [self.resultsController indexPathForObject:obj];
+    [self.tableView scrollToRowAtIndexPath:indexPath atScrollPosition:UITableViewScrollPositionMiddle animated:NO];
 }
+
+- (NSManagedObjectID *)selectedObjectID
+{
+    if (_selectedObjectID != nil || _selectedObjectDotcomID == nil) {
+        return _selectedObjectID;
+    }
+    
+    // Retrieve
+    NSManagedObjectContext *context = [[ContextManager sharedInstance] mainContext];
+    BlogService *service = [[BlogService alloc] initWithManagedObjectContext:context];
+    Blog *selectedBlog = [service blogByBlogId:self.selectedObjectDotcomID];
+    
+    // Cache
+    _selectedObjectID = selectedBlog.objectID;
+    
+    return _selectedObjectID;
+}
+
 
 #pragma mark - Notifications
 
@@ -110,12 +168,25 @@ static NSString *const BlogCellIdentifier = @"BlogCell";
     [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:0] withRowAnimation:UITableViewRowAnimationFade];
 }
 
+
+#pragma mark - NSFetchedResultsControllerDelegate
+
+- (void)controllerDidChangeContent:(NSFetchedResultsController *)controller
+{
+    [self.tableView reloadData];
+}
+
+
 #pragma mark - Actions
 
 - (IBAction)cancelButtonTapped:(id)sender
 {
-    if (self.cancelCompletionHandler) {
-        self.cancelCompletionHandler();
+    if (self.dismissHandler) {
+        self.dismissHandler();
+    }
+    
+    if (self.dismissOnCancellation) {
+        [self.navigationController popViewControllerAnimated:YES];
     }
 }
 
@@ -128,14 +199,13 @@ static NSString *const BlogCellIdentifier = @"BlogCell";
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section
 {
-    id<NSFetchedResultsSectionInfo> sectionInfo;
-    NSInteger numberOfRows = 0;
-    if ([self.resultsController sections].count > section) {
-        sectionInfo = [[self.resultsController sections] objectAtIndex:section];
-        numberOfRows = sectionInfo.numberOfObjects;
+    NSArray *sections = self.resultsController.sections;
+    if (sections.count == 0) {
+        return 0;
     }
-
-    return numberOfRows;
+    
+    id <NSFetchedResultsSectionInfo> sectionInfo = sections[section];
+    return sectionInfo.numberOfObjects;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath
@@ -148,35 +218,6 @@ static NSString *const BlogCellIdentifier = @"BlogCell";
     return cell;
 }
 
-- (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section
-{
-    if (![self hasDotComAndSelfHosted]) {
-        return nil;
-    }
-    return [[self.resultsController sectionIndexTitles] objectAtIndex:section];
-}
-
-- (NSInteger)sectionForDotCom
-{
-    if ([self.resultsController sections].count > 0) {
-        id<NSFetchedResultsSectionInfo> sectionInfo = [[self.resultsController sections] objectAtIndex:0];
-        if ([[sectionInfo name] isEqualToString:@"1"]) {
-            return 0;
-        }
-    }
-
-    return -1;
-}
-
-- (NSInteger)sectionForSelfHosted
-{
-    if ([self sectionForDotCom] >= 0) {
-        return 1;
-    }
-
-    return 0;
-}
-
 - (void)configureCell:(UITableViewCell *)cell atIndexPath:(NSIndexPath *)indexPath
 {
     cell.textLabel.textAlignment = NSTextAlignmentLeft;
@@ -184,33 +225,19 @@ static NSString *const BlogCellIdentifier = @"BlogCell";
     cell.accessoryView = nil;
 
     Blog *blog = [self.resultsController objectAtIndexPath:indexPath];
-    if ([blog.blogName length] != 0) {
-        cell.textLabel.text = blog.blogName;
+    NSString *name = blog.settings.name;
+    
+    if (name.length != 0) {
+        cell.textLabel.text = name;
         cell.detailTextLabel.text = blog.url;
     } else {
         cell.textLabel.text = blog.url;
     }
 
-    [cell.imageView setImageWithBlavatarUrl:blog.blavatarUrl isWPcom:blog.isWPcom];
+    [cell.imageView setImageWithSiteIcon:blog.icon];
 
     cell.accessoryType = blog.objectID == self.selectedObjectID ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
     cell.selectionStyle = UITableViewCellSelectionStyleBlue;
-}
-
-- (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section
-{
-    WPTableViewSectionHeaderView *header = [[WPTableViewSectionHeaderView alloc] initWithFrame:CGRectMake(0, 0, CGRectGetWidth(self.view.bounds), 0)];
-    header.fixedWidthEnabled = NO;
-    header.title = [self tableView:self.tableView titleForHeaderInSection:section];
-    return header;
-}
-
-- (CGFloat)tableView:(UITableView *)tableView heightForHeaderInSection:(NSInteger)section
-{
-    NSString *title = [self tableView:self.tableView titleForHeaderInSection:section];
-    return [WPTableViewSectionHeaderView heightForTitle:title
-                                               andWidth:CGRectGetWidth(self.view.bounds)
-                                      fixedWidthEnabled:NO];
 }
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath
@@ -243,19 +270,34 @@ static NSString *const BlogCellIdentifier = @"BlogCell";
     }
 
     // Fire off the selection after a short delay to let animations complete for selection/deselection
-    if (self.selectedCompletionHandler) {
+    if (self.successHandler) {
         double delayInSeconds = 0.2;
         dispatch_time_t popTime = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delayInSeconds * NSEC_PER_SEC));
         dispatch_after(popTime, dispatch_get_main_queue(), ^(void){
-            self.selectedCompletionHandler(self.selectedObjectID);
+            self.successHandler(self.selectedObjectID);
+            
+            if (self.dismissOnCompletion) {
+                [self.navigationController popViewControllerAnimated:YES];
+            }
         });
     }
 }
 
 - (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath
 {
-    return 54;
+    return BlogCellRowHeight;
 }
+
+- (CGFloat)tableView:(UITableView *)tableView heightForHeaderInSection:(NSInteger)section
+{
+    // In iPad devices + Non Modal Presentation, we actually do want the standard UITableView's top padding
+    if ([UIDevice isPad] && !self.presentingViewController) {
+        return 0;
+    }
+    
+    return CGFLOAT_MIN;
+}
+
 
 #pragma mark - NSFetchedResultsController
 
@@ -265,16 +307,16 @@ static NSString *const BlogCellIdentifier = @"BlogCell";
         return _resultsController;
     }
 
-    NSManagedObjectContext *moc = [[ContextManager sharedInstance] mainContext];
-    NSFetchRequest *fetchRequest = [NSFetchRequest fetchRequestWithEntityName:@"Blog"];
-    [fetchRequest setSortDescriptors:@[[NSSortDescriptor sortDescriptorWithKey:@"account.isWpcom" ascending:NO], [NSSortDescriptor sortDescriptorWithKey:@"blogName" ascending:YES selector:@selector(localizedCaseInsensitiveCompare:)]]];
-    [fetchRequest setPredicate:[self fetchRequestPredicate]];
+    NSManagedObjectContext *context = [[ContextManager sharedInstance] mainContext];
+    NSFetchRequest *request = [NSFetchRequest fetchRequestWithEntityName:self.entityName];
+    request.sortDescriptors = _displaysPrimaryBlogOnTop ? self.sortDescriptorsWithAccountKeyPath : self.sortDescriptors;
+    request.predicate = [self fetchRequestPredicate];
 
-    _resultsController = [[NSFetchedResultsController alloc]
-                          initWithFetchRequest:fetchRequest
-                          managedObjectContext:moc
-                          sectionNameKeyPath:@"isWPcom"
-                          cacheName:nil];
+    NSString *sectionNameKeyPath = _displaysPrimaryBlogOnTop ? self.sectionNameKeyPath : nil;
+    _resultsController = [[NSFetchedResultsController alloc] initWithFetchRequest:request
+                                                             managedObjectContext:context
+                                                               sectionNameKeyPath:sectionNameKeyPath
+                                                                        cacheName:nil];
     _resultsController.delegate = self;
 
     NSError *error = nil;
@@ -282,28 +324,61 @@ static NSString *const BlogCellIdentifier = @"BlogCell";
         DDLogError(@"Couldn't fetch sites: %@", [error localizedDescription]);
         _resultsController = nil;
     }
+    
     return _resultsController;
+}
+
+- (NSString *)entityName
+{
+    return NSStringFromClass([Blog class]);
+}
+
+- (NSString *)sectionNameKeyPath
+{
+    return @"sectionIdentifier";
+}
+
+- (NSString *)defaultBlogAccountIdKeyPath
+{
+    return @"accountForDefaultBlog.userID";
+}
+
+- (NSString *)siteNameKeyPath
+{
+    return @"settings.name";
 }
 
 - (NSPredicate *)fetchRequestPredicate
 {
-    if ([self.tableView isEditing]) {
-        return nil;
+    NSString *predicate = @"(visible = YES)";
+    if (!self.displaysOnlyDefaultAccountSites) {
+        return [NSPredicate predicateWithFormat:predicate];
     }
-
-    return [NSPredicate predicateWithFormat:@"visible = YES"];
+    
+    NSManagedObjectContext *context = [[ContextManager sharedInstance] mainContext];
+    AccountService *accountService = [[AccountService alloc] initWithManagedObjectContext:context];
+    WPAccount *defaultAccount = [accountService defaultWordPressComAccount];
+    
+    predicate = [predicate stringByAppendingString:@" AND (account == %@ OR jetpackAccount == %@)"];
+    return [NSPredicate predicateWithFormat:predicate, defaultAccount, defaultAccount];
 }
 
-- (NSString *)controller:(NSFetchedResultsController *)controller sectionIndexTitleForSectionName:(NSString *)sectionName
+- (NSArray *)sortDescriptors
 {
-    if ([sectionName isEqualToString:@"1"]) {
-        NSManagedObjectContext *context = [[ContextManager sharedInstance] mainContext];
-        AccountService *accountService = [[AccountService alloc] initWithManagedObjectContext:context];
-        WPAccount *defaultAccount = [accountService defaultWordPressComAccount];
+    return @[[NSSortDescriptor sortDescriptorWithKey:self.siteNameKeyPath
+                                           ascending:YES
+                                            selector:@selector(localizedCaseInsensitiveCompare:)]];
+}
 
-        return [NSString stringWithFormat:NSLocalizedString(@"%@'s sites", @"Section header for WordPress.com blogs"), [defaultAccount username]];
-    }
-    return NSLocalizedString(@"Self Hosted", @"Section header for self hosted blogs");
+- (NSArray *)sortDescriptorsWithAccountKeyPath
+{
+    NSMutableArray *descriptors = [@[[NSSortDescriptor sortDescriptorWithKey:self.defaultBlogAccountIdKeyPath
+                                                                   ascending:NO
+                                                                    selector:@selector(compare:)]]
+                                   mutableCopy];
+    
+    [descriptors addObjectsFromArray:self.sortDescriptors];
+    return descriptors;
 }
 
 @end

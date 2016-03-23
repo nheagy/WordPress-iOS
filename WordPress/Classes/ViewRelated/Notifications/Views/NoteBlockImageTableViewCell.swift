@@ -1,10 +1,10 @@
 import Foundation
-
+import WordPressShared.WPStyleGuide
 
 @objc public class NoteBlockImageTableViewCell : NoteBlockTableViewCell
 {
     // MARK: - Public Properties
-    public var isBadge: Bool = false {
+    public override var isBadge: Bool {
         didSet {
             backgroundColor = isBadge ? Styles.badgeBackgroundColor : Styles.blockBackgroundColor
         }
@@ -28,7 +28,7 @@ import Foundation
     // MARK: - View Methods
     public override func awakeFromNib() {
         super.awakeFromNib()
-        selectionStyle  = .None
+        selectionStyle = .None
     }
     
     // MARK: - Private

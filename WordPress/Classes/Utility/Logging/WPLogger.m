@@ -1,11 +1,12 @@
 #import "WPLogger.h"
 
 // Pods
-#import <CocoaLumberjack/DDLog.h>
+#import <CocoaLumberjack/CocoaLumberjack.h>
 #import <CocoaLumberjack/DDASLLogger.h>
 #import <CocoaLumberjack/DDFileLogger.h>
 #import <CocoaLumberjack/DDTTYLogger.h>
-#import <CrashlyticsLogger.h>
+
+#import "WPCrashlyticsLogger.h"
 
 @interface WPLogger ()
 @property (nonatomic, strong, readwrite) DDFileLogger *fileLogger;
@@ -47,14 +48,14 @@
 #endif
     
 #ifndef INTERNAL_BUILD
-    [DDLog addLogger:[CrashlyticsLogger sharedInstance]];
+    [DDLog addLogger:[WPCrashlyticsLogger sharedInstance]];
 #endif
     
     [DDLog addLogger:self.fileLogger];
     
     BOOL extraDebug = [[NSUserDefaults standardUserDefaults] boolForKey:@"extra_debug"];
     if (extraDebug) {
-        ddLogLevel = LOG_LEVEL_VERBOSE;
+        ddLogLevel = DDLogLevelVerbose;
     }
 }
 
